@@ -2,6 +2,17 @@
 
 All notable changes to `gardenia` are documented in this file.
 
+## Unreleased
+
+- Bounded the AGCoord broker probe in `gardenia host check` with `agc --json list --limit 1`
+  and raised `BROKER_PROBE_TIMEOUT_SECONDS` from `10.0s` to `30.0s` so large historical run
+  counts and concurrent cgroup activity do not trigger false probe timeouts (`#3`).
+- Distinguished broker probe timeouts (`reason: "timeout"`) from missing/stopped brokers:
+  `gardenia host check` now emits a non-destructive `agc --json list --limit 1` remediation
+  instead of suggesting `agc host install --user`, and `gardenia host setup` refuses to
+  mutate the AGCoord broker (exit code `2`) when the probe times out unless `--broker skip`
+  or `--force-broker` is passed (`#3`).
+
 ## 0.1.0 — 2026-11-22
 
 - Initial `gardenia` `0.1.0` zero-dependency CLI (`Python 3.11+`, console script `gardenia`)

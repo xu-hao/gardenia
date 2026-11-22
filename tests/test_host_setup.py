@@ -12,6 +12,12 @@ from conftest import (
     make_python_shim,
     run_cli,
 )
+import pytest
+
+from gardenia.cli import main as cli_main
+import gardenia.host as host_mod
+from gardenia.host import setup_host
+from gardenia.models import GardeniaError
 
 
 def _install_logging_installer(bin_dir: Path, name: str, log_path: Path) -> None:
@@ -179,3 +185,102 @@ def test_host_setup_pipx_fallback_and_reserve_config_overwrite_safety(tmp_path: 
     )
     assert proc_overwrite.returncode == 0, proc_overwrite.stderr
     assert tomllib.loads(cfg_path.read_text(encoding="utf-8"))["agents"]["agy"]["host_reserve_pct"] == 10
+
+
+def test_host_setup_refuses_broker_mutation_on_probe_timeout_unless_skip_or_force(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env, home, bin_dir = make_isolated_env(tmp_path)
+    log_path = tmp_path / "calls.jsonl"
+    _install_logging_installer(bin_dir, "uv", log_path)
+    install_healthy_host_shims(bin_dir, home, broker_mode="timeout", log_path=log_path)
+
+    monkeypatch.setattr(host_mod, "BROKER_PROBE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("os.environ", dict(env))
+
+    for mode in ("auto", "user", "enforced"):
+        if log_path.exists():
+            log_path.unlink()
+        with pytest.raises(GardeniaError) as exc_info:
+            setup_host(
+                broker=mode,
+                clients=["agy"],
+                upgrade=True,
+                reserve_pct=5.0,
+                env=env,
+                platform="linux",
+            )
+        assert exc_info.value.exit_code == 2
+        assert "timed out" in exc_info.value.message
+        assert "--broker skip" in exc_info.value.message
+        assert "--force-broker" in exc_info.value.message
+
+        # Confirm refusal happened before executing any CLI/plugin/broker/config mutations.
+        logged = _read_logged_commands(log_path)
+        assert not any(c[0] == "uv" for c in logged)
+        assert not any(c[:2] == ["agc", "host"] for c in logged)
+        assert not any(c[:2] == ["agy", "plugin"] and c[2] != "list" for c in logged)
+        assert not (home / ".config" / "agroute" / "config.toml").exists()
+
+        # Also verify CLI boundary exit code and JSON error envelope.
+        rc = cli_main(["host", "setup", "--broker", mode, "--clients", "agy", "--json"])
+        out = capsys.readouterr().out
+        assert rc == 2
+        err_payload = json.loads(out)
+        assert err_payload["ok"] is False
+        assert err_payload["exit_code"] == 2
+        assert "timed out" in err_payload["error"]
+
+    # --broker skip succeeds cleanly even when the broker probe times out.
+    if log_path.exists():
+        log_path.unlink()
+    res_skip = setup_host(
+        broker="skip",
+        clients=["agy"],
+        upgrade=True,
+        env=env,
+        platform="linux",
+    )
+    assert res_skip["ok"] is True
+    broker_actions = [a for a in res_skip["actions"] if a["component"] == "agcoord-broker"]
+    assert len(broker_actions) == 1
+    assert broker_actions[0]["kind"] == "skip"
+    assert broker_actions[0]["status"] == "skipped"
+    skip_cmds = _read_logged_commands(log_path)
+    assert not any(c[:2] == ["agc", "host"] for c in skip_cmds)
+    assert ["uv", "tool", "install", "--upgrade", "howhard"] in skip_cmds
+
+    # --force-broker explicitly overrides the timeout refusal across broker modes.
+    rc_force_auto = cli_main(
+        ["host", "setup", "--broker", "auto", "--force-broker", "--clients", "agy", "--dry-run", "--json"]
+    )
+    force_auto_payload = json.loads(capsys.readouterr().out)
+    assert rc_force_auto == 0
+    force_auto_cmds = [a["command"] for a in force_auto_payload["actions"] if a["kind"] == "command"]
+    assert ["agc", "host", "install", "--user"] in force_auto_cmds
+
+    if log_path.exists():
+        log_path.unlink()
+    res_force_user = setup_host(
+        broker="user",
+        force_broker=True,
+        clients=["agy"],
+        env=env,
+        platform="linux",
+    )
+    assert res_force_user["ok"] is True
+    assert ["agc", "host", "install", "--user"] in _read_logged_commands(log_path)
+
+    res_force_enf = setup_host(
+        broker="enforced",
+        force_broker=True,
+        clients=["agy"],
+        dry_run=True,
+        env=env,
+        platform="linux",
+    )
+    assert res_force_enf["ok"] is True
+    force_enf_cmds = [a["command"] for a in res_force_enf["actions"] if a["kind"] == "command"]
+    assert ["agc", "host", "install", "--download"] in force_enf_cmds

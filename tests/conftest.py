@@ -136,8 +136,32 @@ def install_healthy_host_shims(
         if "--version" in sys.argv:
             print("agc {agc_ver}")
             sys.exit(0)
-        if sys.argv[1:] == ["--json", "list"]:
+        if sys.argv[1:3] == ["--json", "list"]:
+            rest = sys.argv[3:]
+            if rest:
+                if len(rest) == 2 and rest[0] == "--limit":
+                    try:
+                        limit_val = int(rest[1])
+                    except ValueError:
+                        limit_val = 0
+                    if limit_val <= 0:
+                        print("error: limit must be a positive integer", file=sys.stderr)
+                        sys.exit(2)
+                else:
+                    print(f"unexpected args: {{rest}}", file=sys.stderr)
+                    sys.exit(2)
             print({json.dumps(json.dumps(agc_list_payload))})
+            sys.exit(0)
+        sys.exit(0)
+        """
+    elif broker_mode == "timeout":
+        agc_body = f"""
+        import sys, time
+        if "--version" in sys.argv:
+            print("agc {agc_ver}")
+            sys.exit(0)
+        if sys.argv[1:3] == ["--json", "list"]:
+            time.sleep(0.5)
             sys.exit(0)
         sys.exit(0)
         """
@@ -147,7 +171,7 @@ def install_healthy_host_shims(
         if "--version" in sys.argv:
             print("agc {agc_ver}")
             sys.exit(0)
-        if sys.argv[1:] == ["--json", "list"]:
+        if sys.argv[1:3] == ["--json", "list"]:
             print("broker unreachable", file=sys.stderr)
             sys.exit(1)
         sys.exit(0)

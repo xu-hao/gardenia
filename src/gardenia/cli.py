@@ -152,7 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--force-broker",
         action="store_true",
         default=False,
-        help="Allow --broker user even when an enforced cgroup-v2 broker is active.",
+        help="Allow --broker user over an active cgroup-v2 broker or override broker probe timeout refusal.",
     )
     host_setup.add_argument("--upgrade", action="store_true", default=False, help="Upgrade installed CLIs and plugins.")
     host_setup.add_argument("--reserve-pct", type=float, default=None, help="Write host_reserve_pct to ~/.config/agroute/config.toml.")

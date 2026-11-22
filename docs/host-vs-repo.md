@@ -36,10 +36,17 @@ modules:
 
 On Ubuntu 24.04-class hosts with a privileged `cgroup-v2` AGCoord broker, blindly running
 `agc host install --user` would replace or conflict with kernel-enforced resource limits.
-`gardenia host check` inspects `agc --json list` (`resource_bindings`) read-only, and
+`gardenia host check` probes `agc --json list --limit 1` (`resource_bindings`) read-only
+with a `30s` timeout so large historical run logs do not bloat IPC responses; if the probe
+still times out under heavy load, it reports `reason: "timeout"` with a non-destructive
+`agc --json list --limit 1` remediation rather than suggesting a user-mode broker install.
 `gardenia host setup`:
 
 - Preserves any active `cgroup-v2` enforced broker untouched under `--broker auto`.
+- Refuses to mutate the AGCoord broker (`--broker auto`, `user`, or `enforced`) with exit
+  code `2` when the `agc --json list --limit 1` probe times out, because `cgroup-v2` vs.
+  `admission-only` mode cannot be determined safely (retry when host load subsides, pass
+  `--broker skip`, or pass `--force-broker`).
 - Refuses `--broker user` with exit code `2` when an enforced broker is detected (unless
   `--force-broker` is explicitly supplied).
 - Uses `agc host upgrade --download` (or `agc host install --download`) only when the
