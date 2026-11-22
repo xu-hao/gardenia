@@ -22,6 +22,8 @@ modules:
 | User-scoped Claude Code plugins | **Per-Host** | `~/.claude/plugins/` (`--scope user`) | `gardenia host setup --clients claude` / `host check` | All Claude Code sessions |
 | User-scoped Antigravity plugins | **Per-Host** | `~/.gemini/config/plugins/` | `gardenia host setup --clients agy` / `host check` | All Antigravity sessions |
 | Subscription plans, quota cutoffs & credit reserves | **Per-Host** | `${XDG_CONFIG_HOME:-~/.config}/agroute/config.toml` | `gardenia host setup --reserve-*` / `host check` | All repos for OS user |
+| Managed repository registry | **Per-Host** | `${XDG_CONFIG_HOME:-~/.config}/gardenia/repos.toml` (or `GARDENIA_REPOS_CONFIG`) | `gardenia repos` (`list`, `add`, `remove`, `scan`, `prune`) and primary `repo init` | All fleet sweeps for OS user |
+| Upgrade sweep failure logs | **Per-Host** | `${XDG_STATE_HOME:-~/.local/state}/gardenia/logs/` (or `GARDENIA_LOG_DIR`) | `gardenia repos upgrade` | Local diagnostics only |
 | Contributor guardrails (managed block + project rules) | **Per-Repo Tracked** | `<repo>/AGENTS.md` | `gardenia repo init` / `repo render` / `repo check` | All contributors via Git |
 | Claude Code root instruction symlink | **Per-Repo Tracked** | `<repo>/CLAUDE.md -> AGENTS.md` | `gardenia repo init` / `repo check` | All contributors via Git |
 | Gardenia repository profile | **Per-Repo Tracked** | `<repo>/gardenia.toml` (or `[tool.gardenia]` in `pyproject.toml`) | `gardenia repo init --save-config` / `repo check` | All contributors via Git |
@@ -69,8 +71,15 @@ Under the `agrein` workflow, ticket work happens in temporary linked Git worktre
 - `gardenia repo init` refuses linked worktrees by default (exit code `2`) so routine
   onboarding runs in the primary checkout rather than an ephemeral ticket branch; pass
   `--allow-worktree` when intentionally updating `AGENTS.md` inside an issue worktree.
+  Even with `--allow-worktree`, `repo init` automatically skips updating
+  `repos.toml` (and refuses explicit `--register` with exit code `2`) so ephemeral
+  `/var/tmp` issue worktrees never pollute the host repository registry.
 - `gardenia repo check` resolves both `--git-dir` and `--git-common-dir` so it accurately
   locates shared `.git/howhard` and `.git/agroute` stores from any linked worktree.
+- `gardenia repos upgrade` never mutates any registered repository's primary checkout:
+  each repository is evaluated inside a temporary isolated worktree created under
+  `--worktree-root` (default `/var/tmp`) and removed in `finally`, with failure logs
+  persisted under host state (`${XDG_STATE_HOME:-~/.local/state}/gardenia/logs/`).
 
 ### 4. Non-destructive `howhard` legacy payload checks
 

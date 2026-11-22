@@ -11,6 +11,15 @@ from gardenia import __version__
 from gardenia.host import check_host, parse_clients_arg, setup_host
 from gardenia.models import CHECK_FORMAT, Finding, GardeniaError, compute_ok
 from gardenia.repo import check_repo, init_repo, render_repo, try_resolve_git_repo
+from gardenia.repos import (
+    add_repos,
+    check_repos,
+    list_repos,
+    prune_repos,
+    remove_repos,
+    scan_repos,
+    upgrade_repos,
+)
 
 
 def _add_profile_flags(parser: argparse.ArgumentParser) -> None:
@@ -215,12 +224,121 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Allow running repo init inside a linked Git worktree.",
     )
+    reg_group = repo_init.add_mutually_exclusive_group()
+    reg_group.add_argument(
+        "--register",
+        dest="register",
+        action="store_true",
+        default=None,
+        help="Register the repository in the host repos registry (default for primary checkouts; refused on linked worktrees).",
+    )
+    reg_group.add_argument(
+        "--no-register",
+        dest="register",
+        action="store_false",
+        default=None,
+        help="Do not register the repository in the host repos registry.",
+    )
     repo_init.add_argument("--dry-run", action="store_true", default=False, help="Plan edits without writing files.")
     repo_init.add_argument("--json", action="store_true", default=False, help="Emit machine-readable JSON.")
 
     repo_render = repo_sub.add_parser("render", help="Print the rendered managed AGENTS.md block without modifying files.")
     _add_profile_flags(repo_render)
     repo_render.add_argument("--json", action="store_true", default=False, help="Emit machine-readable JSON.")
+
+    # Multi-repository fleet subcommands
+    repos_parser = subparsers.add_parser(
+        "repos",
+        help="Manage the host repository registry and run fleet checks or isolated-worktree upgrade sweeps.",
+    )
+    repos_sub = repos_parser.add_subparsers(dest="repos_command", required=True)
+
+    repos_list = repos_sub.add_parser("list", help="List registered (and optionally discovered) managed repositories.")
+    repos_list.add_argument("--root", default=None, help="Optional workspace root to scan read-only for additional managed repos.")
+    repos_list.add_argument("--max-depth", type=int, default=2, help="Maximum directory depth when scanning --root (default: 2).")
+    repos_list.add_argument("--strict", action="store_true", default=False, help="Exit 1 if any listed repo is missing, non-primary, unmanaged, or out of sync.")
+    repos_list.add_argument("--json", action="store_true", default=False, help="Emit gardenia-repos-list-v1 JSON.")
+
+    repos_add = repos_sub.add_parser("add", help="Register one or more primary Git repositories in repos.toml.")
+    repos_add.add_argument("paths", nargs="*", metavar="PATH", help="Repository path(s) to register (default: current directory).")
+    repos_add.add_argument("--json", action="store_true", default=False, help="Emit machine-readable JSON.")
+
+    repos_remove = repos_sub.add_parser("remove", help="Remove repository path(s) from repos.toml idempotently.")
+    repos_remove.add_argument("paths", nargs="+", metavar="PATH", help="Repository path(s) to remove.")
+    repos_remove.add_argument("--json", action="store_true", default=False, help="Emit machine-readable JSON.")
+
+    repos_scan = repos_sub.add_parser("scan", help="Discover primary gardenia-managed Git repositories under --root and register them.")
+    repos_scan.add_argument("--root", required=True, help="Root directory to walk for managed Git repositories.")
+    repos_scan.add_argument("--max-depth", type=int, default=2, help="Maximum directory depth under --root (default: 2).")
+    repos_scan.add_argument("--dry-run", action="store_true", default=False, help="Discover repositories without modifying repos.toml.")
+    repos_scan.add_argument("--json", action="store_true", default=False, help="Emit machine-readable JSON.")
+
+    repos_prune = repos_sub.add_parser("prune", help="Remove stale, non-Git, or linked-worktree entries from repos.toml.")
+    repos_prune.add_argument("--dry-run", action="store_true", default=False, help="Report entries that would be removed without modifying repos.toml.")
+    repos_prune.add_argument("--json", action="store_true", default=False, help="Emit machine-readable JSON.")
+
+    repos_check = repos_sub.add_parser("check", help="Run read-only gardenia repo check across all target repositories.")
+    repos_check.add_argument("--root", default=None, help="Optional workspace root to include in discovery.")
+    repos_check.add_argument("--repo", dest="repos", action="append", default=None, help="Explicit target repository path (repeatable; overrides registry).")
+    repos_check.add_argument("--max-depth", type=int, default=2, help="Maximum directory depth when scanning --root (default: 2).")
+    repos_check.add_argument("--strict", action="store_true", default=False, help="Treat warnings as failures.")
+    repos_check.add_argument("--json", action="store_true", default=False, help="Emit gardenia-repos-check-v1 JSON.")
+
+    repos_upgrade = repos_sub.add_parser(
+        "upgrade",
+        help="Run isolated-worktree policy sync, lock/dependency upgrades, and validation gates across target repositories.",
+    )
+    repos_upgrade.add_argument("--root", default=None, help="Optional workspace root to include in discovery.")
+    repos_upgrade.add_argument("--repo", dest="repos", action="append", default=None, help="Explicit target repository path (repeatable; overrides registry).")
+    repos_upgrade.add_argument("--max-depth", type=int, default=2, help="Maximum directory depth when scanning --root (default: 2).")
+    repos_upgrade.add_argument("--package", dest="packages", action="append", default=None, help="Specific dependency package name to upgrade (repeatable).")
+
+    sync_group = repos_upgrade.add_mutually_exclusive_group()
+    sync_group.add_argument(
+        "--sync-policy",
+        dest="sync_policy",
+        action="store_true",
+        default=True,
+        help="Refresh AGENTS.md/CLAUDE.md via gardenia repo init inside the isolated worktree (default).",
+    )
+    sync_group.add_argument(
+        "--no-sync-policy",
+        dest="sync_policy",
+        action="store_false",
+        help="Skip AGENTS.md/CLAUDE.md synchronization.",
+    )
+
+    locks_group = repos_upgrade.add_mutually_exclusive_group()
+    locks_group.add_argument(
+        "--upgrade-locks",
+        dest="upgrade_locks",
+        action="store_true",
+        default=True,
+        help="Refresh uv.lock/Cargo.lock or provision a fresh test venv for pyproject.toml repos (default).",
+    )
+    locks_group.add_argument(
+        "--no-upgrade-locks",
+        dest="upgrade_locks",
+        action="store_false",
+        help="Skip lockfile and dependency upgrades.",
+    )
+
+    repos_upgrade.add_argument(
+        "--land",
+        action="store_true",
+        default=False,
+        help="Commit verified updates on an upgrade branch, open tracking issue + PR, and land via agc land (or gh pr merge when docs-only).",
+    )
+    repos_upgrade.add_argument(
+        "--file-issues",
+        action="store_true",
+        default=False,
+        help="Open (or reuse an existing open) GitHub issue when a repository gate fails.",
+    )
+    repos_upgrade.add_argument("--worktree-root", default=None, help="Base directory for temporary isolated worktrees (default: /var/tmp or system temp dir).")
+    repos_upgrade.add_argument("--log-dir", default=None, help="Directory for persisted failure logs (default: $GARDENIA_LOG_DIR or ~/.local/state/gardenia/logs).")
+    repos_upgrade.add_argument("--dry-run", action="store_true", default=False, help="Inspect targets and print planned steps without creating worktrees or running gates.")
+    repos_upgrade.add_argument("--json", action="store_true", default=False, help="Emit gardenia-repos-upgrade-v1 JSON.")
 
     return parser
 
@@ -317,6 +435,85 @@ def _format_actions_human(title: str, actions: list[dict[str, Any]], *, dry_run:
         elif action.get("path"):
             line += f" ({action['path']})"
         lines.append(line)
+    return lines
+
+
+def _format_repos_list_human(res: dict[str, Any]) -> list[str]:
+    lines = [f"Host repository registry ({res['registry_path']}):"]
+    if not res["repos"]:
+        lines.append("  (no repositories)")
+        return lines
+    for item in res["repos"]:
+        tags: list[str] = []
+        tags.append("registered" if item["registered"] else "discovered")
+        if not item["exists"]:
+            tags.append("missing")
+        elif not item["is_git_repo"]:
+            tags.append("not-git")
+        else:
+            if item["is_linked_worktree"]:
+                tags.append("linked-worktree")
+            tags.append(f"branch={item['branch']}")
+            tags.append("clean" if item["clean"] else "dirty")
+            tags.append("managed" if item["managed"] else "unmanaged")
+            if item["agents_md_in_sync"] is True:
+                tags.append("agents=in-sync")
+            elif item["agents_md_in_sync"] is False:
+                tags.append("agents=out-of-sync")
+        lines.append(f"  {item['name']} ({item['path']}): {', '.join(tags)}")
+    summary = res["summary"]
+    lines.append(
+        f"Summary: total={summary['total']}, registered={summary['registered']}, "
+        f"managed={summary['managed']}, in_sync={summary['in_sync']}, issues={summary['issues']}"
+    )
+    return lines
+
+
+def _format_repos_check_human(res: dict[str, Any]) -> list[str]:
+    lines = [f"Fleet check ({res['summary']['total']} repositories):"]
+    for item in res["repos"]:
+        status = "ok" if item["ok"] else "fail"
+        counts = item["counts"]
+        lines.append(
+            f"  [{status}] {item['name']} ({item['path']}): "
+            f"{counts['errors']} error(s), {counts['warnings']} warning(s)"
+        )
+        for finding in item["findings"]:
+            if finding["severity"] in ("error", "warning"):
+                lines.append(f"    [{finding['severity']}] {finding['component']}: {finding['message']}")
+    summary = res["summary"]
+    lines.append(
+        f"Summary: ok={summary['ok']}/{summary['total']}, failed={summary['failed']}, "
+        f"errors={summary['errors']}, warnings={summary['warnings']}"
+    )
+    return lines
+
+
+def _format_repos_upgrade_human(res: dict[str, Any]) -> list[str]:
+    prefix = "[dry-run] " if res["dry_run"] else ""
+    lines = [f"{prefix}Fleet upgrade ({res['summary']['total']} repositories):"]
+    for item in res["repos"]:
+        detail_parts: list[str] = []
+        if item.get("changed_files"):
+            detail_parts.append(f"changed={len(item['changed_files'])}")
+        if item.get("pr_url"):
+            detail_parts.append(f"pr={item['pr_url']}")
+        if item.get("issue_url"):
+            detail_parts.append(f"issue={item['issue_url']}")
+        if item.get("log_path"):
+            detail_parts.append(f"log={item['log_path']}")
+        if item.get("planned_steps"):
+            detail_parts.append(f"steps={','.join(item['planned_steps'])}")
+        if item.get("error"):
+            detail_parts.append(f"error={item['error']}")
+        suffix = f" ({'; '.join(detail_parts)})" if detail_parts else ""
+        lines.append(f"  [{item['status']}] {item['name']} ({item['path']}){suffix}")
+    s = res["summary"]
+    lines.append(
+        f"Summary: total={s['total']}, up_to_date={s['up_to_date']}, "
+        f"changes_verified={s['changes_verified']}, landed={s['landed']}, "
+        f"gate_failed={s['gate_failed']}, error={s['error']}"
+    )
     return lines
 
 
@@ -463,6 +660,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     force_claude_symlink=args.force_claude_symlink,
                     save_config=args.save_config,
                     allow_worktree=args.allow_worktree,
+                    register=args.register,
                     dry_run=args.dry_run,
                 )
                 if want_json:
@@ -470,6 +668,95 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else:
                     lines = _format_actions_human(f"Repository init ({res['root']})", res["actions"], dry_run=args.dry_run)
                     print("\n".join(lines))
+                return 0 if res["ok"] else 1
+
+        if args.command == "repos":
+            if args.repos_command == "list":
+                res = list_repos(root=args.root, max_depth=args.max_depth, strict=args.strict)
+                if want_json:
+                    _emit_json(res)
+                else:
+                    print("\n".join(_format_repos_list_human(res)))
+                return 0 if res["ok"] else 1
+
+            if args.repos_command == "add":
+                res = add_repos(args.paths)
+                if want_json:
+                    _emit_json(res)
+                else:
+                    print(
+                        f"Registry ({res['registry_path']}): added {len(res['added'])}, "
+                        f"already registered {len(res['already_registered'])}, total {len(res['repos'])}."
+                    )
+                return 0
+
+            if args.repos_command == "remove":
+                res = remove_repos(args.paths)
+                if want_json:
+                    _emit_json(res)
+                else:
+                    print(
+                        f"Registry ({res['registry_path']}): removed {len(res['removed'])}, "
+                        f"not found {len(res['not_found'])}, total {len(res['repos'])}."
+                    )
+                return 0
+
+            if args.repos_command == "scan":
+                res = scan_repos(root=args.root, max_depth=args.max_depth, dry_run=args.dry_run)
+                if want_json:
+                    _emit_json(res)
+                else:
+                    prefix = "[dry-run] " if args.dry_run else ""
+                    print(
+                        f"{prefix}Scan ({res['root']}): discovered {len(res['discovered'])}, "
+                        f"added {len(res['added'])}, already registered {len(res['already_registered'])}, "
+                        f"total {len(res['repos'])}."
+                    )
+                return 0
+
+            if args.repos_command == "prune":
+                res = prune_repos(dry_run=args.dry_run)
+                if want_json:
+                    _emit_json(res)
+                else:
+                    prefix = "[dry-run] " if args.dry_run else ""
+                    print(
+                        f"{prefix}Prune ({res['registry_path']}): removed {len(res['removed'])}, "
+                        f"kept {len(res['kept'])}."
+                    )
+                return 0
+
+            if args.repos_command == "check":
+                res = check_repos(
+                    repos=args.repos,
+                    root=args.root,
+                    max_depth=args.max_depth,
+                    strict=args.strict,
+                )
+                if want_json:
+                    _emit_json(res)
+                else:
+                    print("\n".join(_format_repos_check_human(res)))
+                return 0 if res["ok"] else 1
+
+            if args.repos_command == "upgrade":
+                res = upgrade_repos(
+                    repos=args.repos,
+                    root=args.root,
+                    max_depth=args.max_depth,
+                    packages=args.packages,
+                    sync_policy=args.sync_policy,
+                    upgrade_locks=args.upgrade_locks,
+                    land=args.land,
+                    file_issues=args.file_issues,
+                    worktree_root=args.worktree_root,
+                    log_dir=args.log_dir,
+                    dry_run=args.dry_run,
+                )
+                if want_json:
+                    _emit_json(res)
+                else:
+                    print("\n".join(_format_repos_upgrade_human(res)))
                 return 0 if res["ok"] else 1
 
     except GardeniaError as exc:

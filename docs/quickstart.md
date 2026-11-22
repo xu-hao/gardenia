@@ -98,12 +98,38 @@ What `gardenia repo init` does:
    passed).
 3. With `--save-config`, writes `gardenia.toml` so future `gardenia repo check` and
    `gardenia repo init` runs share the same profile.
+4. Automatically records the primary checkout in `${XDG_CONFIG_HOME:-~/.config}/gardenia/repos.toml`
+   (skipped automatically inside linked Git worktrees or when `--no-register` is passed).
 
 Verify repository tracked policy and local `.git/` state:
 
 ```sh
 gardenia repo check --strict
 ```
+
+## Step 3 — Across your workstation fleet (`gardenia repos`)
+
+Discover already-managed repositories under your workspace root, inspect fleet status,
+and run read-only checks across every registered repository:
+
+```sh
+gardenia repos scan --root ~/git
+gardenia repos list --strict
+gardenia repos check --strict
+```
+
+When `gardenia`, `pytest`, `howhard`, `agroute`, or another dependency upgrades, sweep
+every managed repository safely inside disposable isolated Git worktrees (leaving every
+primary checkout untouched):
+
+```sh
+gardenia repos upgrade --dry-run
+gardenia repos upgrade --package howhard --file-issues
+```
+
+Pass `--land` to commit verified policy/lockfile updates on a dedicated branch, open a
+tracking issue and pull request, and land through `agc land` (or `gh pr merge` when only
+documentation-exempt files changed).
 
 ## Unified check
 

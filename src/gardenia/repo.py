@@ -935,6 +935,7 @@ def init_repo(
     force_claude_symlink: bool = False,
     save_config: bool = False,
     allow_worktree: bool = False,
+    register: bool | None = None,
     dry_run: bool = False,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -946,6 +947,12 @@ def init_repo(
         raise GardeniaError(
             f"Refusing to run 'repo init' inside linked Git worktree {git_info.root}. "
             "Run in the primary checkout or pass --allow-worktree explicitly.",
+            exit_code=2,
+        )
+    if git_info.is_linked_worktree and register is True:
+        raise GardeniaError(
+            f"Refusing to register linked Git worktree {git_info.root} in the host repository registry. "
+            "Register the primary checkout instead or omit --register.",
             exit_code=2,
         )
 
@@ -1084,6 +1091,56 @@ def init_repo(
                 )
             )
 
+    # 4. Optional host repository registry update.
+    from gardenia.repos import effective_repos_config_path, load_repos_registry, save_repos_registry
+
+    registry_path = effective_repos_config_path(effective_env)
+    updated_registry_repos: list[str] | None = None
+    should_register = (register is True) or (register is None and not git_info.is_linked_worktree)
+    if register is False:
+        actions.append(
+            PlannedAction(
+                kind="skip",
+                component="repos-registry",
+                description="Skipping host repository registry update (--no-register).",
+                path=str(registry_path),
+                status="skipped",
+            )
+        )
+    elif git_info.is_linked_worktree:
+        actions.append(
+            PlannedAction(
+                kind="skip",
+                component="repos-registry",
+                description="Skipping host repository registry update inside a linked Git worktree.",
+                path=str(registry_path),
+                status="skipped",
+            )
+        )
+    elif should_register:
+        reg = load_repos_registry(effective_env)
+        root_str = str(git_info.root)
+        if root_str in reg["repos"]:
+            actions.append(
+                PlannedAction(
+                    kind="skip",
+                    component="repos-registry",
+                    description="Repository is already registered in the host repository registry.",
+                    path=str(registry_path),
+                    status="skipped",
+                )
+            )
+        else:
+            updated_registry_repos = sorted(set(reg["repos"]) | {root_str})
+            actions.append(
+                PlannedAction(
+                    kind="write_file",
+                    component="repos-registry",
+                    description=f"Register {root_str} in the host repository registry.",
+                    path=str(registry_path),
+                )
+            )
+
     if not dry_run:
         for action in actions:
             if action.kind == "skip":
@@ -1098,6 +1155,13 @@ def init_repo(
                 action.status = "executed"
             elif action.component == "gardenia-config" and action.kind == "write_file" and rendered_toml is not None:
                 gardenia_toml_path.write_text(rendered_toml, encoding="utf-8")
+                action.status = "executed"
+            elif (
+                action.component == "repos-registry"
+                and action.kind == "write_file"
+                and updated_registry_repos is not None
+            ):
+                save_repos_registry(updated_registry_repos, env=effective_env)
                 action.status = "executed"
 
     return {

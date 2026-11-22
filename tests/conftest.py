@@ -38,6 +38,7 @@ def make_isolated_env(tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
     env = {
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_STATE_HOME": str(home / ".local" / "state"),
         "PATH": str(bin_dir),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"),
