@@ -11,6 +11,10 @@ from conftest import (
     make_python_shim,
     run_cli,
 )
+import pytest
+
+from gardenia.cli import main as cli_main
+import gardenia.host as host_mod
 from gardenia.host import check_host
 
 
@@ -164,3 +168,71 @@ def test_host_check_admission_only_broker_is_info_not_error(tmp_path: Path) -> N
     assert data["host"]["broker"]["mode"] == "admission-only"
     assert data["host"]["broker"]["enforced"] is False
     assert any(f["component"] == "agcoord-broker" and f["severity"] == "info" for f in data["findings"])
+
+
+def test_host_check_bounds_agc_broker_probe_with_limit_1_and_30s_timeout(tmp_path: Path) -> None:
+    env, home, bin_dir = make_isolated_env(tmp_path)
+    log_file = tmp_path / "calls.jsonl"
+    install_healthy_host_shims(bin_dir, home, broker_mode="cgroup-v2", log_path=log_file)
+
+    proc = run_cli(["host", "check", "--strict", "--json"], cwd=tmp_path, env=env)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    calls = [
+        [Path(entry["argv"][0]).name, *entry["argv"][1:]]
+        for line in log_file.read_text(encoding="utf-8").splitlines()
+        for entry in (json.loads(line),)
+    ]
+    agc_calls = [c for c in calls if c[0] == "agc"]
+    assert ["agc", "--json", "list", "--limit", "1"] in agc_calls
+    assert ["agc", "--json", "list"] not in agc_calls
+    assert host_mod.BROKER_PROBE_TIMEOUT_SECONDS == 30.0
+
+
+def test_host_check_broker_probe_timeout_emits_non_destructive_remediation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env, home, bin_dir = make_isolated_env(tmp_path / "timeout_case")
+    log_file = tmp_path / "timeout_calls.jsonl"
+    install_healthy_host_shims(bin_dir, home, broker_mode="timeout", log_path=log_file)
+
+    monkeypatch.setattr(host_mod, "BROKER_PROBE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("os.environ", dict(env))
+
+    rc = cli_main(["host", "check", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    data = json.loads(captured.out)
+    assert data["ok"] is False
+    assert data["host"]["broker"]["status"] == "unreachable"
+    assert data["host"]["broker"]["reason"] == "timeout"
+    assert data["host"]["broker"]["reachable"] is False
+
+    broker_findings = [f for f in data["findings"] if f["component"] == "agcoord-broker"]
+    assert len(broker_findings) == 1
+    finding = broker_findings[0]
+    assert finding["scope"] == "host"
+    assert finding["severity"] == "error"
+    assert "timed out" in finding["message"]
+    assert "agc --json list --limit 1" in finding["message"]
+    assert finding["remediation"] == "agc --json list --limit 1"
+    assert "agc host install" not in finding["remediation"]
+
+    calls = [
+        [Path(entry["argv"][0]).name, *entry["argv"][1:]]
+        for line in log_file.read_text(encoding="utf-8").splitlines()
+        for entry in (json.loads(line),)
+    ]
+    assert ["agc", "--json", "list", "--limit", "1"] in calls
+
+    # Non-timeout failure (e.g. missing/stopped broker) still recommends installing a broker.
+    env_unreach, home_unreach, bin_unreach = make_isolated_env(tmp_path / "unreach_case")
+    install_healthy_host_shims(bin_unreach, home_unreach, broker_mode="unreachable")
+    res_unreach = check_host(env=env_unreach, platform="linux")
+    assert res_unreach["host"]["broker"]["status"] == "unreachable"
+    assert res_unreach["host"]["broker"]["reason"] == "command-failed"
+    unreach_findings = [f for f in res_unreach["findings"] if f["component"] == "agcoord-broker"]
+    assert len(unreach_findings) == 1
+    assert "agc host install --user" in unreach_findings[0]["remediation"]

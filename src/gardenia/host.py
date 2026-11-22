@@ -32,7 +32,7 @@ from gardenia.models import (
 )
 
 SETUP_COMMAND_TIMEOUT_SECONDS = 300.0
-BROKER_PROBE_TIMEOUT_SECONDS = 10.0
+BROKER_PROBE_TIMEOUT_SECONDS = 30.0
 
 
 def _effective_env(env: Mapping[str, str] | None) -> dict[str, str]:
@@ -219,18 +219,29 @@ def _inspect_agcoord_broker(
             "resource_bindings": {},
         }
 
-    result = run_cmd([agc_info["path"], "--json", "list"], timeout=BROKER_PROBE_TIMEOUT_SECONDS, env=env)
+    result = run_cmd([agc_info["path"], "--json", "list", "--limit", "1"], timeout=BROKER_PROBE_TIMEOUT_SECONDS, env=env)
     if not result.ok:
         detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
-        findings.append(
-            Finding(
-                scope="host",
-                severity="error",
-                component="agcoord-broker",
-                message=f"AGCoord host broker is not reachable via 'agc --json list': {detail}",
-                remediation="agc host install --user  # or for cgroup-v2 enforcement: agc host install --download",
+        if result.timed_out:
+            findings.append(
+                Finding(
+                    scope="host",
+                    severity="error",
+                    component="agcoord-broker",
+                    message=f"AGCoord host broker probe timed out via 'agc --json list --limit 1': {detail}",
+                    remediation="agc --json list --limit 1",
+                )
             )
-        )
+        else:
+            findings.append(
+                Finding(
+                    scope="host",
+                    severity="error",
+                    component="agcoord-broker",
+                    message=f"AGCoord host broker is not reachable via 'agc --json list --limit 1': {detail}",
+                    remediation="agc host install --user  # or for cgroup-v2 enforcement: agc host install --download",
+                )
+            )
         return {
             "status": "unreachable",
             "reason": "timeout" if result.timed_out else "command-failed",
@@ -252,8 +263,8 @@ def _inspect_agcoord_broker(
                 scope="host",
                 severity="error",
                 component="agcoord-broker",
-                message=f"Could not parse JSON output from 'agc --json list': {exc}",
-                remediation="agc --json list",
+                message=f"Could not parse JSON output from 'agc --json list --limit 1': {exc}",
+                remediation="agc --json list --limit 1",
             )
         )
         return {
@@ -953,6 +964,13 @@ def setup_host(
     broker_enforced = bool(broker_state.get("enforced"))
     broker_reachable = bool(broker_state.get("reachable"))
     include_agcoord = is_linux or with_agcoord
+    if include_agcoord and broker != "skip" and broker_state.get("reason") == "timeout" and not force_broker:
+        raise GardeniaError(
+            "Refusing to mutate the AGCoord broker because the 'agc --json list --limit 1' probe timed out, "
+            "so its enforcement mode ('cgroup-v2' vs 'admission-only') could not be determined safely. "
+            "Retry when host load subsides, pass '--broker skip', or pass '--force-broker' to override.",
+            exit_code=2,
+        )
     if include_agcoord and broker == "user" and broker_enforced and not force_broker:
         raise GardeniaError(
             "Refusing '--broker user': an active cgroup-v2 enforced AGCoord broker is already running "

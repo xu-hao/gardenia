@@ -9,7 +9,7 @@
 | ---: | --- |
 | `0` | Success; checks found no errors (and no warnings when `--strict` is set). |
 | `1` | Check found one or more errors (or warnings under `--strict`), or a host setup command failed. |
-| `2` | Invalid CLI usage, invalid configuration, or safety precondition refusal (for example: non-Git directory, linked worktree without `--allow-worktree`, `--broker user` against an active `cgroup-v2` enforced broker without `--force-broker`, or overwriting an existing `~/.config/agroute/config.toml` without `--overwrite-config`). |
+| `2` | Invalid CLI usage, invalid configuration, or safety precondition refusal (for example: non-Git directory, linked worktree without `--allow-worktree`, `--broker user` against an active `cgroup-v2` enforced broker without `--force-broker`, broker mutation when the `agc --json list --limit 1` probe timed out without `--broker skip` or `--force-broker`, or overwriting an existing `~/.config/agroute/config.toml` without `--overwrite-config`). |
 
 ## Global options
 
@@ -39,8 +39,10 @@ Checks performed:
 
 1. Host CLIs on `PATH`: `howhard` (`>= 4.0.0`), `agr` (`>= 0.6.0`), and on Linux `agc`
    (`>= 0.10.0`).
-2. Linux `agcoord` broker status via `agc --json list` (bounded timeout), classifying
-   `resource_bindings` into `cgroup-v2` (enforced) vs. `admission-only` (user mode).
+2. Linux `agcoord` broker status via `agc --json list --limit 1` (`30s` timeout),
+   classifying `resource_bindings` into `cgroup-v2` (enforced) vs. `admission-only`
+   (user mode) and distinguishing probe timeouts (`reason: "timeout"`, non-destructive
+   `agc --json list --limit 1` remediation) from missing or stopped brokers.
 3. User-scoped plugins (`agrein`, `agcoord`, `howhard`, `agroute`) per target client:
    - `agy`: `agy plugin list --json`.
    - `claude`: `claude plugin list --json`.
@@ -81,8 +83,8 @@ gardenia host setup \
 | --- | --- |
 | `--clients LIST` | Comma-separated clients to configure (default: detected clients on `PATH`). |
 | `--installer MODE` | `auto` (prefers `uv`, falls back to `pipx`), `uv`, or `pipx`. |
-| `--broker MODE` | `auto` (preserves active `cgroup-v2` enforced broker; installs user broker only when missing/unreachable), `user` (refuses with exit `2` if enforced broker active unless `--force-broker`), `enforced` (`agc host install --download` or `upgrade --download`), or `skip`. |
-| `--force-broker` | Allow `--broker user` even when an active `cgroup-v2` enforced broker is detected. |
+| `--broker MODE` | `auto` (preserves active `cgroup-v2` enforced broker; installs user broker only when confirmed missing/stopped; refuses with exit `2` if broker probe times out unless `--force-broker`), `user` (refuses with exit `2` if enforced broker active or probe times out unless `--force-broker`), `enforced` (`agc host install --download` or `upgrade --download`; refuses with exit `2` if probe times out unless `--force-broker`), or `skip`. |
+| `--force-broker` | Allow `--broker user` over an active `cgroup-v2` enforced broker, or override broker mutation refusal when the `agc --json list --limit 1` probe times out. |
 | `--upgrade` | Upgrade already-installed CLIs and refresh plugins across target clients. |
 | `--reserve-pct FLOAT` | Write `host_reserve_pct` (`0..100`) for `codex`, `claude`, and `agy` in `~/.config/agroute/config.toml`. |
 | `--host-reserve-credit FLOAT` | Write `host_reserve_credit_usd` (`>= 0`) for each agent. |
