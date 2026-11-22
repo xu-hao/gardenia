@@ -1,7 +1,7 @@
 # gardenia
 
 ```{image} assets/gardenia.svg
-:alt: gardenia rosette mark
+:alt: gardenia fractal mark
 :width: 160px
 :align: center
 ```
