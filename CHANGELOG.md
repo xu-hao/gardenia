@@ -4,6 +4,8 @@ All notable changes to `gardenia` are documented in this file.
 
 ## Unreleased
 
+## 0.1.1 — 2026-11-22
+
 - Bounded the AGCoord broker probe in `gardenia host check` with `agc --json list --limit 1`
   and raised `BROKER_PROBE_TIMEOUT_SECONDS` from `10.0s` to `30.0s` so large historical run
   counts and concurrent cgroup activity do not trigger false probe timeouts (`#3`).
