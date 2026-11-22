@@ -4,6 +4,8 @@ All notable changes to `gardenia` are documented in this file.
 
 ## Unreleased
 
+## 0.2.0 — 2026-11-22
+
 - Added `gardenia repos` multi-repository host registry, fleet check, and
   isolated-worktree policy/dependency upgrade sweep (`#9`):
   - Host repository registry at `${GARDENIA_REPOS_CONFIG:-${XDG_CONFIG_HOME:-~/.config}/gardenia/repos.toml}`
@@ -21,6 +23,10 @@ All notable changes to `gardenia` are documented in this file.
     checkouts, persist failure logs under `XDG_STATE_HOME` / `--log-dir`, optionally
     file deduplicated GitHub issues (`--file-issues`), and optionally open and land
     verified updates (`--land`, honoring `docs_exemption`).
+- Replaced `docs/assets/gardenia.svg` with the borderless four-blossom Fibonacci
+  Golden-Rectangle *Gardenia jasminoides* mark (`89 : 55 : 34 : 21` for `agrein`,
+  `agcoord`, `howhard`, and `agroute`) and updated provenance in
+  `docs/assets/README.md` (`#7`, `#10`).
 
 ## 0.1.1 — 2026-11-22
 

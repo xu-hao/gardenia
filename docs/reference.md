@@ -17,7 +17,7 @@
 gardenia --version
 ```
 
-Prints `gardenia 0.1.0` and exits `0`.
+Prints `gardenia 0.2.0` and exits `0`.
 
 ## `gardenia host check`
 
@@ -284,7 +284,7 @@ via a sibling temporary file plus `os.replace`. Malformed TOML, unknown keys, wr
 ```json
 {
   "format": "gardenia-check-v1",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "ok": true,
   "strict": false,
   "host": {
