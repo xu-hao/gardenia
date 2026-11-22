@@ -13,6 +13,10 @@ Scope = Literal["host", "repo"]
 Severity = Literal["error", "warning", "info"]
 
 CHECK_FORMAT = "gardenia-check-v1"
+REPOS_REGISTRY_FORMAT = "gardenia-repos-v1"
+REPOS_LIST_FORMAT = "gardenia-repos-list-v1"
+REPOS_CHECK_FORMAT = "gardenia-repos-check-v1"
+REPOS_UPGRADE_FORMAT = "gardenia-repos-upgrade-v1"
 GITHUB_OWNER = "xu-hao"
 
 MANAGED_BEGIN = "<!-- gardenia:begin -->"

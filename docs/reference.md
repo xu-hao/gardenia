@@ -142,8 +142,102 @@ Additional `gardenia repo init` options:
 | `--force-claude-symlink` | Replace a non-matching regular file or symlink at `CLAUDE.md`. |
 | `--save-config` | Write the resolved profile cleanly to `gardenia.toml`. |
 | `--allow-worktree` | Allow running `repo init` inside a linked Git worktree (otherwise refused with exit `2`). |
+| `--register` / `--no-register` | Control updating the host repository registry (`repos.toml`). Defaults to registering primary checkouts and automatically skipping linked worktrees; explicit `--register` on a linked worktree is refused with exit `2`. |
 | `--dry-run` | Plan edits without writing files. |
 | `--json` | Emit structured JSON output. |
+
+## `gardenia repos`
+
+Multi-repository workstation registry, fleet verification, and isolated-worktree policy
+and dependency upgrade sweeps.
+
+The host repository registry path resolves as:
+
+1. `$GARDENIA_REPOS_CONFIG` (when set and non-empty), else
+2. `${XDG_CONFIG_HOME}/gardenia/repos.toml` (when `XDG_CONFIG_HOME` is set), else
+3. `${HOME}/.config/gardenia/repos.toml`.
+
+### Registry subcommands
+
+```sh
+gardenia repos list [--root PATH] [--max-depth INT] [--strict] [--json]
+gardenia repos add [PATH ...] [--json]
+gardenia repos remove PATH [PATH ...] [--json]
+gardenia repos scan --root PATH [--max-depth INT] [--dry-run] [--json]
+gardenia repos prune [--dry-run] [--json]
+```
+
+- `repos list`: Inspects every registered repository (plus non-mutating discovery under
+  `--root` when provided) and reports `path`, `name`, `registered`, `exists`,
+  `is_git_repo`, `is_linked_worktree`, `branch`, `clean`, `managed`, and
+  `agents_md_in_sync` in `gardenia-repos-list-v1` JSON. Exits `0` (or `1` under
+  `--strict` if any listed repository is missing, not a primary Git repo, unmanaged, or
+  has `agents_md_in_sync: false`).
+- `repos add`: Resolves each path (defaulting to the current working directory) to its
+  primary Git root, refusing non-Git directories and linked worktrees with exit `2`, and
+  atomically updates `repos.toml`.
+- `repos remove`: Canonicalizes each path and removes matching entries from `repos.toml`
+  idempotently.
+- `repos scan`: Walks `--root` up to `--max-depth` (default `2`, must be `>= 0`),
+  skipping hidden directories, `node_modules`, `__pycache__`, and linked worktrees, and
+  registers primary Git checkouts managed by `gardenia` (`gardenia.toml`,
+  `[tool.gardenia]` in `pyproject.toml`, or `<!-- gardenia:begin -->` in `AGENTS.md`).
+- `repos prune`: Removes entries from `repos.toml` that no longer exist on disk or are
+  no longer primary Git checkouts.
+
+### `gardenia repos check`
+
+Runs read-only `gardenia repo check` across all target repositories (explicit repeatable
+`--repo PATH`, or `repos.toml` combined with optional `--root` discovery; exits `2` when
+no target repositories are found). Missing or broken registered paths are captured as
+repo-level error entries rather than aborting the fleet check.
+
+```sh
+gardenia repos check [--root PATH] [--repo PATH ...] [--max-depth INT] [--strict] [--json]
+```
+
+Emits `gardenia-repos-check-v1` JSON and exits `0` when all repositories pass or `1`
+when any repository fails.
+
+### `gardenia repos upgrade`
+
+Sweeps target repositories inside disposable isolated Git worktrees without ever
+mutating any primary checkout.
+
+```sh
+gardenia repos upgrade \
+  [--root PATH] \
+  [--repo PATH ...] \
+  [--max-depth INT] \
+  [--package PKG ...] \
+  [--sync-policy | --no-sync-policy] \
+  [--upgrade-locks | --no-upgrade-locks] \
+  [--land] \
+  [--file-issues] \
+  [--worktree-root DIR] \
+  [--log-dir DIR] \
+  [--dry-run] \
+  [--json]
+```
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--root PATH` | unset | Optional workspace root to include in discovery when `--repo` is not passed. |
+| `--repo PATH` | unset | Explicit target repository path (repeatable; overrides `repos.toml`). |
+| `--package PKG` | unset | Specific package to upgrade (repeatable; validated against whitespace and shell metacharacters). |
+| `--sync-policy` / `--no-sync-policy` | enabled | Refresh `AGENTS.md` / `CLAUDE.md` via `init_repo(..., allow_worktree=True, register=False)` inside the temporary worktree. |
+| `--upgrade-locks` / `--no-upgrade-locks` | enabled | Refresh `uv.lock` (`uv lock --upgrade` / `--upgrade-package`), `Cargo.lock` (`cargo update` / `-p`), or provision an isolated test virtualenv for unpinned `pyproject.toml` repositories. |
+| `--land` | disabled | Commit verified updates on `gardenia-upgrade-<timestamp>`, push to `origin`, open a tracking issue and PR (`Closes #<N>`), and land via `agc land` (or `gh pr merge --merge --delete-branch` when all changed files qualify under `docs_exemption` or `agc` is not active). |
+| `--file-issues` | disabled | When a repository gate fails, open a GitHub issue via `gh` (or reuse an existing open issue with the same upgrade-failure title). |
+| `--worktree-root DIR` | `/var/tmp` (or temp dir) | Base directory for temporary isolated worktrees (cleaned up unconditionally in `finally`). |
+| `--log-dir DIR` | `$GARDENIA_LOG_DIR` or `${XDG_STATE_HOME:-~/.local/state}/gardenia/logs` | Directory where failed gate logs are persisted. |
+| `--dry-run` | disabled | Inspect target repositories read-only and report planned steps without creating worktrees or running gates. |
+| `--json` | disabled | Emit `gardenia-repos-upgrade-v1` JSON. |
+
+Per-repository statuses in `gardenia-repos-upgrade-v1`:
+
+- `planned` (`--dry-run` only), `up_to_date`, `changes_verified`, `landed` → healthy (exit `0` when all repos succeed).
+- `gate_failed`, `error` → failure (exit `1`; failure log persisted under `--log-dir` / `XDG_STATE_HOME`).
 
 ## `gardenia check`
 
@@ -170,6 +264,20 @@ agcoord = "auto"         # "auto" | "required" | "none"
 docs_exemption = true
 claude_symlink = true
 ```
+
+## Host repository registry schema (`repos.toml`)
+
+```toml
+format = "gardenia-repos-v1"
+repos = [
+  "/abs/path/to/repo-a",
+  "/abs/path/to/repo-b",
+]
+```
+
+Paths are canonicalized, deduplicated, sorted lexicographically, and written atomically
+via a sibling temporary file plus `os.replace`. Malformed TOML, unknown keys, wrong
+`format`, or invalid `repos` entries fail with exit code `2`.
 
 ## `gardenia-check-v1` JSON schema
 

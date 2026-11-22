@@ -27,7 +27,12 @@ schema, and documentation page:
   distinguishing **tracked repository settings** (`AGENTS.md` managed block,
   `CLAUDE.md -> AGENTS.md` symlink, `gardenia.toml` / `[tool.gardenia]`, optional
   `howhard.toml` and `agroute.toml`) from **local per-clone `.git/` state**
-  (`.git/howhard` and `.git/agroute`). It never mutates user-home host installations.
+  (`.git/howhard` and `.git/agroute`). It never mutates user-home host installations
+  (other than optionally recording primary checkouts in the host repository registry).
+- **`gardenia repos ...`** maintains the workstation's host repository registry
+  (`${XDG_CONFIG_HOME:-~/.config}/gardenia/repos.toml`), runs read-only fleet checks
+  (`gardenia repos check`), and performs isolated-worktree policy and dependency upgrade
+  sweeps (`gardenia repos upgrade`) without ever mutating any repository's primary checkout.
 - **`gardenia check`** combines `host check` and (when inside a Git checkout or given
   `--repo`) `repo check`, tagging every finding with `"scope": "host"` or
   `"scope": "repo"` and a concrete remediation command.
@@ -63,6 +68,20 @@ and persist your profile to `gardenia.toml`:
 ```sh
 gardenia repo init --gate "bash scripts/check" --cpu 4 --memory-gb 4 --save-config
 gardenia repo check
+```
+
+### Step 3 — Across your managed repositories (`gardenia repos`)
+
+Register existing primary checkouts once (new `gardenia repo init` runs register primary
+checkouts automatically while skipping linked worktrees), verify every repository in one
+command, and run isolated-worktree policy or dependency upgrade sweeps:
+
+```sh
+gardenia repos scan --root ~/git
+gardenia repos list
+gardenia repos check --strict
+gardenia repos upgrade --dry-run
+gardenia repos upgrade --package howhard --file-issues
 ```
 
 ### Unified diagnostic

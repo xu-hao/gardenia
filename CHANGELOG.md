@@ -4,6 +4,24 @@ All notable changes to `gardenia` are documented in this file.
 
 ## Unreleased
 
+- Added `gardenia repos` multi-repository host registry, fleet check, and
+  isolated-worktree policy/dependency upgrade sweep (`#9`):
+  - Host repository registry at `${GARDENIA_REPOS_CONFIG:-${XDG_CONFIG_HOME:-~/.config}/gardenia/repos.toml}`
+    (`format = "gardenia-repos-v1"`) with canonical atomic writes and subcommands
+    `gardenia repos list`, `add`, `remove`, `scan`, and `prune`.
+  - Integrated automatic primary-checkout registration into `gardenia repo init`
+    (`--register` / `--no-register`), skipping linked Git worktrees automatically (and
+    refusing explicit `--register` on linked worktrees with exit code `2`).
+  - Added `gardenia repos check` (`gardenia-repos-check-v1`) to verify all registered,
+    discovered, or explicit `--repo` checkouts in one read-only pass.
+  - Added `gardenia repos upgrade` (`gardenia-repos-upgrade-v1`) to sync policy, refresh
+    `uv.lock` / `Cargo.lock` or provision fresh virtual environments for unpinned
+    `pyproject.toml` repositories, run each repository's configured gate (via `agc run`
+    when applicable) inside disposable isolated worktrees without ever mutating primary
+    checkouts, persist failure logs under `XDG_STATE_HOME` / `--log-dir`, optionally
+    file deduplicated GitHub issues (`--file-issues`), and optionally open and land
+    verified updates (`--land`, honoring `docs_exemption`).
+
 ## 0.1.1 — 2026-11-22
 
 - Bounded the AGCoord broker probe in `gardenia host check` with `agc --json list --limit 1`

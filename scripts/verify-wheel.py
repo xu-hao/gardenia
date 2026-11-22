@@ -20,7 +20,7 @@ assert sdist.is_file(), f"Missing sdist: {sdist}"
 
 with zipfile.ZipFile(wheel) as archive:
     names = archive.namelist()
-    for mod in ("__init__.py", "__main__.py", "cli.py", "host.py", "models.py", "repo.py"):
+    for mod in ("__init__.py", "__main__.py", "cli.py", "host.py", "models.py", "repo.py", "repos.py"):
         assert f"gardenia/{mod}" in names, f"Missing module in wheel: {mod}"
     assert not any(name.startswith("tests/") for name in names), "tests/ must not be inside wheel"
     assert not any(name.startswith("scripts/") for name in names), "scripts/ must not be inside wheel"
