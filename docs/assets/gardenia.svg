@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"
+     role="img" aria-labelledby="gardenia-title gardenia-description">
+  <title id="gardenia-title">gardenia rosette mark</title>
+  <desc id="gardenia-description">A symmetrical eight-petal pinwheel gardenia rosette inside an open-cornered square garden border, in solid black on white.</desc>
+  <rect width="512" height="512" fill="#ffffff"/>
+  <!-- Open-cornered square garden border (edges at 52 and 460, open corner gaps of 56 units). -->
+  <path fill="none" stroke="#000000" stroke-width="17" stroke-linecap="round"
+        d="M 108 52 H 404
+           M 460 108 V 404
+           M 404 460 H 108
+           M 52 404 V 108"/>
+  <!-- Eight-petal pinwheel gardenia rosette with exact C8 rotational symmetry. -->
+  <circle cx="256" cy="256" r="34" fill="none" stroke="#000000" stroke-width="17"/>
+  <path fill="none" stroke="#000000" stroke-width="17" stroke-linecap="round" stroke-linejoin="round"
+        d="M 256.000 222.000 C 242.455 179.185 265.487 120.331 317.824 117.141 C 363.061 137.097 353.713 179.658 329.386 189.647
+           M 280.042 231.958 C 300.739 192.106 358.641 166.776 397.904 201.528 C 415.781 247.626 379.076 271.112 354.810 260.973
+           M 290.000 256.000 C 332.815 242.455 391.669 265.487 394.859 317.824 C 374.903 363.061 332.342 353.713 322.353 329.386
+           M 280.042 280.042 C 319.894 300.739 345.224 358.641 310.472 397.904 C 264.374 415.781 240.888 379.076 251.027 354.810
+           M 256.000 290.000 C 269.545 332.815 246.513 391.669 194.176 394.859 C 148.939 374.903 158.287 332.342 182.614 322.353
+           M 231.958 280.042 C 211.261 319.894 153.359 345.224 114.096 310.472 C 96.219 264.374 132.924 240.888 157.190 251.027
+           M 222.000 256.000 C 179.185 269.545 120.331 246.513 117.141 194.176 C 137.097 148.939 179.658 158.287 189.647 182.614
+           M 231.958 231.958 C 192.106 211.261 166.776 153.359 201.528 114.096 C 247.626 96.219 271.112 132.924 260.973 157.190"/>
+</svg>
