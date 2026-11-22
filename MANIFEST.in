@@ -1,0 +1,6 @@
+include AGENTS.md CHANGELOG.md gardenia.toml
+include .readthedocs.yaml
+recursive-include docs *.md *.py *.txt *.svg
+recursive-exclude docs/_build *
+recursive-include scripts *
+recursive-include tests *.py

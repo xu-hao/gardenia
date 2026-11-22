@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gardenia"
+dynamic = ["version"]
+description = "Bootstrap, initialize, and verify the coding-agent stack with explicit host vs. repository separation."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "build"]
+docs = ["sphinx>=8", "myst-parser>=4", "furo"]
+
+[project.scripts]
+gardenia = "gardenia.cli:main"
+
+[project.urls]
+Repository = "https://github.com/xu-hao/gardenia"
+Issues = "https://github.com/xu-hao/gardenia/issues"
+Changelog = "https://github.com/xu-hao/gardenia/blob/main/CHANGELOG.md"
+Documentation = "https://gardenia.readthedocs.io/en/latest/"
+
+[tool.setuptools.dynamic]
+version = {attr = "gardenia.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
