@@ -18,7 +18,7 @@ uv tool install gardenia
 gardenia --version
 ```
 
-Expect `gardenia 0.1.0`.
+Expect `gardenia 0.2.0`.
 
 ## Step 1 — Once per workstation (`gardenia host`)
 
