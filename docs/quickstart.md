@@ -142,3 +142,12 @@ gardenia check --json
 
 Every finding in `gardenia check` explicitly carries `"scope": "host"` or
 `"scope": "repo"` along with a concrete remediation command.
+
+## Live terminal UIs
+
+Watch live agent routing and job execution without running internal agent commands:
+
+```sh
+agr tui   # model routing and subscription usage limits
+agc tui   # machine job queue, CPU/memory/tmpfs usage, and merge queue
+```

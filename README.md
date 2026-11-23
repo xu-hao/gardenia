@@ -6,77 +6,29 @@
 [Read the documentation](https://gardenia.readthedocs.io/en/latest/)
 
 - A digital artifact factory in a box.
-- Standardized workflows that address common agentic coding pitfalls.
-- Agent-agnostic routing across coding agents — currently supports `Claude Code`, `Codex`, and `Antigravity`.
-- Automatically learns and picks the agent, model, and effort level for each task.
-- Manages local host and remote overflow resources for CPU- and memory-intensive jobs.
+- Standardized workflow that addresses common agentic coding pitfalls.
+- Agent-agnostic and supports routing between different agents (`Claude Code`, `Codex`, `Antigravity`).
+- Automatically learns and picks the agent, model, and effort level for tasks.
+- Manages host and remote resources for CPU- and memory-intensive jobs.
+- Merge queue for landing concurrent pull requests.
 
-## Each tool at a glance
+You run `gardenia` to set up your machine and repositories. `gardenia` installs four tools **for your coding agents** to use on their own:
 
-| Tool | Plain-English job & key entry points | Owns | Never touches |
-| --- | --- | --- | --- |
-| [**`agrein`**](https://github.com/xu-hao/agrein) | Contributor & coordinator workflow skills: `ticket-delivery`, `epic-queue`, `bug-investigation`, `owner-escalation` | Pure-Markdown Agent Skills per client (`codex`, `claude`, `agy`) | Runtime daemons, mutable stores, model choice, quotas, or OS limits |
-| [**`agroute`**](https://github.com/xu-hao/agroute) | Live multi-client quota/reserve filtering, offline price resolution, and launch planning: `agr usage`, `agr candidates`, `agr prices resolve`, `agr plan` | `~/.config/agroute/config.toml`, optional `agroute.toml`, `<git-common-dir>/agroute/` | Network price fetches, task difficulty estimation, semantic memory, or spawning workers |
-| [**`howhard`**](https://github.com/xu-hao/howhard) | Bayesian `(agent, model, effort)` cost/risk selection, outcome accounting, defect attribution, and learning: `howhard context`/`retrieve`/`decide` (or `pick`), `howhard observe`, `attribute-failure`, `howhard memory` | Optional `howhard.toml` and per-clone `<git-common-dir>/howhard/` beliefs, payloads, and semantic memory | Host subscription caps across clients, worker process launch, OS limits, or Git merges |
-| [**`agcoord`**](https://github.com/xu-hao/agcoord) | Shared Linux job queue, kernel `cgroup-v2` isolation, remote overflow execution (`overflow-ssh`, `overflow-gcp-batch`, `overflow-gcp-run`), and atomic gate-plus-merge landing: `agc run`, `agc full`, `agc land` (integer byte `memory` and paired `tmpfs` + `tmpfs_inodes`) | `${XDG_STATE_HOME:-~/.local/state}/agcoord` queue/logs, local `cgroup-v2` slices & overflow pool placement, atomic PR merge | Model selection, task semantics, or source-code edits |
-| **`gardenia`** | Out-of-band provisioning, policy sync, fleet sweeps, and scope-tagged diagnostics: `gardenia host`, `gardenia repo`, `gardenia repos`, `gardenia check` | Host setup & `~/.config/gardenia/repos.toml`, `AGENTS.md` managed block + `CLAUDE.md` + `gardenia.toml`, read-only `.git/` checks | Live routing hot path, executing gates in place of `agc`, or mutating primary checkouts in fleet sweeps |
+- [**`agrein`**](https://github.com/xu-hao/agrein): Workflow skills for agents (issue tracking, isolated git worktrees, bug reproduction, epic queues, and owner escalations).
+- [**`agroute`**](https://github.com/xu-hao/agroute): Checks live usage limits and routes tasks across `Claude Code`, `Codex`, and `Antigravity`.
+- [**`howhard`**](https://github.com/xu-hao/howhard): Picks the model and effort level for each task from past results and repo memory.
+- [**`agcoord`**](https://github.com/xu-hao/agcoord): Schedules CPU- and memory-heavy jobs (locally or on remote runners) and runs the merge queue.
 
-Specifically, `gardenia` enforces the **host vs. repository** split across four command
-groups:
+See the [documentation](https://gardenia.readthedocs.io/en/latest/) (or [docs/index.md](docs/index.md) and [docs/architecture.md](docs/architecture.md)) for details on how the agents coordinate.
 
-- **`gardenia host ...`** inspects or configures only workstation / OS-user state (`PATH`
-  CLIs, Linux `agc` broker without downgrading `cgroup-v2` enforcement, user-scoped
-  plugins across Codex/Claude Code/Antigravity, and `~/.config/agroute/config.toml`). It
-  never inspects or mutates a Git repository.
-- **`gardenia repo ...`** inspects, renders, or updates only a target Git repository,
-  separating **tracked repository settings** (`AGENTS.md` managed block,
-  `CLAUDE.md -> AGENTS.md` symlink, `gardenia.toml` / `[tool.gardenia]`, optional
-  `howhard.toml` and `agroute.toml`) from **local per-clone `.git/` state**
-  (`<git-common-dir>/howhard/` and `<git-common-dir>/agroute/`, checked read-only).
-- **`gardenia repos ...`** maintains the workstation's host repository registry
-  (`${XDG_CONFIG_HOME:-~/.config}/gardenia/repos.toml`), runs read-only fleet audits
-  (`gardenia repos check`), and performs isolated `/var/tmp` worktree policy and
-  dependency upgrade sweeps (`gardenia repos upgrade`) without ever touching any primary
-  checkout.
-- **`gardenia check`** combines `host check` and (when inside a Git checkout or given
-  `--repo`) `repo check`, tagging every finding with `"scope": "host"` or
-  `"scope": "repo"` and a concrete remediation command.
+## What you run
 
-## How they work together on one ticket
-
-1. **Triage & scope (`agrein`)** — Verify or open a `#N — ...` GitHub issue
-   (`ticket-delivery`), sequence multi-ticket dependencies (`epic-queue`), and escalate
-   unsettled product or live-operation approvals upfront (`owner-escalation`).
-2. **Filter live quota & pricing (`agroute`)** — Refresh usage windows (`agr usage`) and
-   emit currently affordable `<agent>/<model>` routes (`agr candidates`), resolving any
-   newly discovered unpriced models offline once via `agr prices resolve`.
-3. **Size difficulty & resolve the execution plan (`howhard` → `agr plan`)** — Select the
-   cost-minimizing `(agent, model, effort)` cell within the defect-risk cap using an
-   independent stateless baseline forecast and repository memory (`howhard context` /
-   `retrieve` / `decide`, or `pick`), then convert it via `agr plan` into a native
-   subagent call (`target_agent == host_agent`) or cross-agent CLI command
-   (`target_agent != host_agent`).
-4. **Implement directly in an isolated worktree (`agrein`)** — The assigned leaf worker
-   implements its assigned ticket directly (without re-delegating that same ticket;
-   multi-ticket work splits into child tickets via `epic-queue`) inside a dedicated
-   `/var/tmp` Git worktree branched from `origin/main` (primary checkout stays read-only),
-   starting bug fixes with a failing behavioral test (`bug-investigation`).
-5. **Validate under `cgroup-v2` or remote overflow and merge atomically (`agcoord`)** —
-   Run checks via `agc run` with integer byte `memory` (and optional `tmpfs` +
-   `tmpfs_inodes`) claims under local `cgroup-v2` bounds or configured remote overflow
-   pools (`--no-overflow` for local-only gates), open the pull request (`Closes #N`), and
-   gate-plus-merge atomically with `agc land <pr>` (or forge merge for documentation-only
-   changes) before cleaning up `/var/tmp`.
-6. **Record outcome & update semantic memory (`howhard`)** — Record the real outcome and
-   measured usage (`howhard observe` and `howhard usage attach` following
-   `matched_receipt` or `raw_native`) and distill reusable lessons into
-   `<git-common-dir>/howhard/` via `howhard memory` (`learn-context` / `learn`).
-
-`gardenia` sits outside this runtime loop: run `gardenia host` once per workstation,
-`gardenia repo` once per repository to wire the `AGENTS.md` contract, `gardenia check` to
-catch drift, and `gardenia repos` to audit or upgrade your repository fleet. Read the full
-plain-English guide in [docs/index.md](docs/index.md) and the Coordinator vs. Leaf Worker
-protocol in [docs/architecture.md](docs/architecture.md).
+- **`gardenia host`**: Sets up or checks workstation tools, the Linux `agc` broker, user-scoped plugins across `Claude Code`, `Codex`, and `Antigravity`, and host quota reserves.
+- **`gardenia repo`**: Initializes or checks a repository's `AGENTS.md` guardrail block, `CLAUDE.md -> AGENTS.md` symlink, and `gardenia.toml`.
+- **`gardenia repos`**: Manages your workstation repository list, runs read-only checks across all registered repos, and runs `/var/tmp` worktree upgrade sweeps.
+- **`gardenia check`**: Runs `host check` and `repo check` together, tagging each finding with `"scope": "host"` or `"scope": "repo"`.
+- **`agr tui`**: Live terminal UI for model routing and subscription usage limits.
+- **`agc tui`**: Live terminal UI for the machine job queue, CPU/memory/`tmpfs` usage, and the merge queue.
 
 ## Quickstart
 
@@ -129,6 +81,13 @@ gardenia repos upgrade --package howhard --file-issues
 
 ```sh
 gardenia check --json
+```
+
+### Live monitoring
+
+```sh
+agr tui   # realtime model-route and subscription quota view
+agc tui   # realtime machine job queue, resource usage, and merge queue
 ```
 
 ## Documentation
