@@ -18,6 +18,7 @@ from gardenia import __version__
 from gardenia.host import BROKER_PROBE_TIMEOUT_SECONDS
 from gardenia.models import (
     DEFAULT_TIMEOUT_SECONDS,
+    DEFAULT_TMPFS_INODES,
     MANAGED_BEGIN,
     REPOS_CHECK_FORMAT,
     REPOS_LIST_FORMAT,
@@ -25,6 +26,7 @@ from gardenia.models import (
     REPOS_UPGRADE_FORMAT,
     Finding,
     GardeniaError,
+    is_finite_number,
     run_cmd,
 )
 from gardenia.repo import (
@@ -41,8 +43,10 @@ from gardenia.repo import (
 REGISTRY_ALLOWED_KEYS = frozenset({"format", "repos"})
 SKIP_SCAN_DIR_NAMES = frozenset({"node_modules", "__pycache__"})
 UPGRADE_CMD_TIMEOUT_SECONDS = 300.0
-GATE_TIMEOUT_SECONDS = 1800.0
+GATE_TIMEOUT_SECONDS = 7200.0
 DOCS_EXEMPT_ROOT_FILES = frozenset({"README.md", "CHANGELOG.md", "AGENTS.md", "CLAUDE.md"})
+_PYPROJECT_EXTRA_KEYS: tuple[str, ...] = ("test", "docs", "dev")
+_PYPROJECT_GROUP_KEYS: tuple[str, ...] = ("dev", "test", "docs")
 
 _PACKAGE_SPEC_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+=-]*$")
 _URL_RE = re.compile(r"https?://\S+")
@@ -762,6 +766,7 @@ def _build_agc_resource_args(profile: RepoProfile) -> list[str]:
     tmpfs = profile.tmpfs_bytes()
     if tmpfs is not None:
         args.extend(["--resource", f"tmpfs={tmpfs}"])
+        args.extend(["--resource", f"tmpfs_inodes={DEFAULT_TMPFS_INODES}"])
     return args
 
 
@@ -841,19 +846,132 @@ def _resolve_base_ref(repo_root: Path, env: Mapping[str, str]) -> tuple[str | No
     return None, True, "Could not resolve a valid base Git ref (origin/HEAD, origin/main, origin/master, or HEAD)."
 
 
-def _pyproject_has_test_extra(pyproject_path: Path) -> bool:
+def _normalize_dep_group_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _collect_dependency_group_reqs(
+    data: Mapping[str, Any],
+    *,
+    pyproject_path: Path,
+    group_names: Sequence[str] = _PYPROJECT_GROUP_KEYS,
+) -> list[str]:
+    dep_groups = data.get("dependency-groups")
+    if dep_groups is None:
+        return []
+    if not isinstance(dep_groups, dict):
+        raise GardeniaError(
+            f"Invalid [dependency-groups] in {pyproject_path}: expected a TOML table.",
+            exit_code=2,
+        )
+
+    normalized_groups: dict[str, Any] = {}
+    for raw_key, raw_items in dep_groups.items():
+        if not isinstance(raw_key, str):
+            raise GardeniaError(
+                f"Invalid group name {raw_key!r} in {pyproject_path} [dependency-groups].",
+                exit_code=2,
+            )
+        norm_key = _normalize_dep_group_name(raw_key)
+        if norm_key in normalized_groups:
+            raise GardeniaError(
+                f"Duplicate normalized dependency group {norm_key!r} in {pyproject_path}.",
+                exit_code=2,
+            )
+        normalized_groups[norm_key] = raw_items
+
+    collected: list[str] = []
+    seen_reqs: set[str] = set()
+    visited_groups: set[str] = set()
+    active_groups: set[str] = set()
+
+    def _resolve(norm_name: str) -> None:
+        if norm_name in active_groups:
+            raise GardeniaError(
+                f"Cyclic include-group reference {norm_name!r} in {pyproject_path} [dependency-groups].",
+                exit_code=2,
+            )
+        if norm_name in visited_groups:
+            return
+        if norm_name not in normalized_groups:
+            raise GardeniaError(
+                f"Unknown include-group {norm_name!r} in {pyproject_path} [dependency-groups].",
+                exit_code=2,
+            )
+        items = normalized_groups[norm_name]
+        if not isinstance(items, list):
+            raise GardeniaError(
+                f"Invalid [dependency-groups].{norm_name} in {pyproject_path}: expected a list.",
+                exit_code=2,
+            )
+
+        active_groups.add(norm_name)
+        for entry in items:
+            if isinstance(entry, str):
+                spec = entry.strip()
+                if spec and spec not in seen_reqs:
+                    seen_reqs.add(spec)
+                    collected.append(spec)
+            elif (
+                isinstance(entry, dict)
+                and set(entry.keys()) == {"include-group"}
+                and isinstance(entry["include-group"], str)
+            ):
+                _resolve(_normalize_dep_group_name(entry["include-group"]))
+            else:
+                raise GardeniaError(
+                    f"Unsupported entry {entry!r} in {pyproject_path} [dependency-groups].{norm_name}.",
+                    exit_code=2,
+                )
+        active_groups.remove(norm_name)
+        visited_groups.add(norm_name)
+
+    for group in group_names:
+        norm_target = _normalize_dep_group_name(group)
+        if norm_target in normalized_groups:
+            _resolve(norm_target)
+
+    return collected
+
+
+def _build_pyproject_install_args(wt_dir: Path) -> list[str]:
+    pyproject_path = wt_dir / "pyproject.toml"
     try:
         data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        return False
-    project = data.get("project")
-    if not isinstance(project, dict):
-        return False
-    opt_deps = project.get("optional-dependencies")
-    return isinstance(opt_deps, dict) and "test" in opt_deps
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise GardeniaError(f"Invalid pyproject.toml ({pyproject_path}): {exc}", exit_code=2) from exc
+
+    group_reqs = _collect_dependency_group_reqs(data, pyproject_path=pyproject_path)
+    has_docs_reqs_file = (wt_dir / "docs" / "requirements.txt").is_file()
+
+    if "project" in data:
+        project = data.get("project")
+        if not isinstance(project, dict):
+            raise GardeniaError(
+                f"Invalid [project] table in {pyproject_path}: expected a TOML table.",
+                exit_code=2,
+            )
+        opt_deps = project.get("optional-dependencies")
+        extras: list[str] = []
+        if isinstance(opt_deps, dict):
+            for key in _PYPROJECT_EXTRA_KEYS:
+                if key in opt_deps:
+                    extras.append(key)
+        install_spec = f".[{','.join(extras)}]" if extras else "."
+        args = ["-e", install_spec, *group_reqs]
+        if has_docs_reqs_file and "docs" not in extras:
+            args.extend(["-r", "docs/requirements.txt"])
+        return args
+
+    args = list(group_reqs)
+    if has_docs_reqs_file:
+        args.extend(["-r", "docs/requirements.txt"])
+    if not args:
+        return []
+    return ["--upgrade", *args]
 
 
-def _list_worktree_changed_files(wt_dir: Path, env: Mapping[str, str]) -> list[str]:
+def _list_worktree_status_entries(wt_dir: Path, env: Mapping[str, str]) -> list[tuple[str, str]]:
     res = run_cmd(
         ["git", "status", "--porcelain", "-z", "--untracked-files=all"],
         cwd=wt_dir,
@@ -864,7 +982,7 @@ def _list_worktree_changed_files(wt_dir: Path, env: Mapping[str, str]) -> list[s
         return []
 
     tokens = res.stdout.split("\0")
-    changed: list[str] = []
+    entries: list[tuple[str, str]] = []
     idx = 0
     while idx < len(tokens):
         token = tokens[idx]
@@ -874,11 +992,45 @@ def _list_worktree_changed_files(wt_dir: Path, env: Mapping[str, str]) -> list[s
         xy = token[:2]
         path_part = token[3:]
         if path_part:
-            changed.append(path_part)
+            entries.append((xy, path_part))
         if "R" in xy or "C" in xy:
             # In -z format, the next NUL token is the original source path for renames/copies.
             idx += 1
-    return sorted(set(changed))
+    return entries
+
+
+def _list_worktree_changed_files(wt_dir: Path, env: Mapping[str, str]) -> list[str]:
+    return sorted({path for _, path in _list_worktree_status_entries(wt_dir, env)})
+
+
+def _clean_untracked_gate_artifacts(
+    wt_dir: Path,
+    pre_gate_changed: Sequence[str],
+    env: Mapping[str, str],
+) -> None:
+    allowed = set(pre_gate_changed)
+    resolved_wt = wt_dir.resolve()
+    for xy, rel_path in _list_worktree_status_entries(wt_dir, env):
+        if xy != "??" or rel_path in allowed:
+            continue
+        target = wt_dir / rel_path
+        resolved_parent = target.parent.resolve()
+        if resolved_parent != resolved_wt and resolved_wt not in resolved_parent.parents:
+            continue
+        if target.is_symlink() or target.is_file():
+            target.unlink(missing_ok=True)
+        elif target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+        parent = target.parent
+        while parent != wt_dir and wt_dir in parent.parents:
+            try:
+                if parent.is_dir() and not any(parent.iterdir()):
+                    parent.rmdir()
+                    parent = parent.parent
+                else:
+                    break
+            except OSError:
+                break
 
 
 def _unique_upgrade_branch(repo_root: Path, base_name: str, env: Mapping[str, str]) -> str:
@@ -1154,6 +1306,7 @@ def _execute_single_repo_upgrade(
     upgrade_locks: bool,
     land: bool,
     file_issues: bool,
+    gate_timeout: float = GATE_TIMEOUT_SECONDS,
     wt_root: Path,
     resolved_log_dir: Path,
     env: Mapping[str, str],
@@ -1299,12 +1452,24 @@ def _execute_single_repo_upgrade(
             if (wt_dir / "pyproject.toml").is_file() and not (wt_dir / "uv.lock").is_file():
                 venv_dir = scratch_dir / "venv"
                 venv_python = venv_dir / "bin" / "python"
-                has_test_extra = _pyproject_has_test_extra(wt_dir / "pyproject.toml")
-                install_spec = ".[test]" if has_test_extra else "."
+                try:
+                    install_args = _build_pyproject_install_args(wt_dir)
+                except GardeniaError as exc:
+                    return _error_result(
+                        str(repo_root),
+                        exc.message,
+                        base_ref=base_ref,
+                        gate=profile.gate,
+                        upgrade_actions=upgrade_actions,
+                    )
 
                 if uv_bin:
-                    create_venv_cmd = [uv_bin, "venv", str(venv_dir)]
-                    install_cmd = [uv_bin, "pip", "install", "--python", str(venv_python), "-e", install_spec]
+                    create_venv_cmd = [uv_bin, "venv", "--seed", str(venv_dir)]
+                    install_cmd = (
+                        [uv_bin, "pip", "install", "--python", str(venv_python), *install_args]
+                        if install_args
+                        else None
+                    )
                     pkg_cmd = (
                         [uv_bin, "pip", "install", "--python", str(venv_python), "--upgrade", *packages]
                         if packages
@@ -1312,10 +1477,15 @@ def _execute_single_repo_upgrade(
                     )
                 else:
                     create_venv_cmd = [sys.executable, "-m", "venv", str(venv_dir)]
-                    install_cmd = [str(venv_python), "-m", "pip", "install", "-e", install_spec]
+                    install_cmd = (
+                        [str(venv_python), "-m", "pip", "install", *install_args]
+                        if install_args
+                        else None
+                    )
                     pkg_cmd = [str(venv_python), "-m", "pip", "install", "--upgrade", *packages] if packages else None
 
-                for step_cmd in [create_venv_cmd, install_cmd, *([pkg_cmd] if pkg_cmd else [])]:
+                steps = [create_venv_cmd, *([install_cmd] if install_cmd else []), *([pkg_cmd] if pkg_cmd else [])]
+                for step_cmd in steps:
                     step_res = run_cmd(step_cmd, cwd=wt_dir, timeout=UPGRADE_CMD_TIMEOUT_SECONDS, env=gate_env)
                     upgrade_actions.append(" ".join(step_cmd))
                     if step_res.stdout or step_res.stderr:
@@ -1335,6 +1505,9 @@ def _execute_single_repo_upgrade(
                 gate_env["PATH"] = f"{venv_bin}{os.pathsep}{existing_path}" if existing_path else venv_bin
                 gate_env["VIRTUAL_ENV"] = str(venv_dir)
 
+        # Capture intentional changes (policy sync + lock/dependency upgrades) BEFORE running profile.gate.
+        changed_files = _list_worktree_changed_files(wt_dir, env)
+
         # 4. Decide agcoord policy and execute profile.gate inside wt_dir.
         use_agc, agc_err = _should_use_agc(profile, cwd=wt_dir, env=gate_env)
         if agc_err:
@@ -1344,6 +1517,7 @@ def _execute_single_repo_upgrade(
                 base_ref=base_ref,
                 used_agcoord=False,
                 gate=profile.gate,
+                changed_files=changed_files,
                 upgrade_actions=upgrade_actions,
             )
 
@@ -1353,8 +1527,7 @@ def _execute_single_repo_upgrade(
             bash_exe = shutil.which("bash", path=gate_env.get("PATH")) or shutil.which("bash") or "/bin/bash"
             gate_cmd = [bash_exe, "-lc", profile.gate]
 
-        gate_res = run_cmd(gate_cmd, cwd=wt_dir, timeout=GATE_TIMEOUT_SECONDS, env=gate_env)
-        changed_files = _list_worktree_changed_files(wt_dir, env)
+        gate_res = run_cmd(gate_cmd, cwd=wt_dir, timeout=gate_timeout, env=gate_env)
 
         # 5. Classify outcome.
         if not gate_res.ok:
@@ -1477,6 +1650,9 @@ def _execute_single_repo_upgrade(
                 upgrade_actions=upgrade_actions,
             )
 
+        # Clean any untracked gate artifacts before creating the --land branch/commit.
+        _clean_untracked_gate_artifacts(wt_dir, changed_files, env)
+
         branch_name = _unique_upgrade_branch(repo_root, f"gardenia-upgrade-{stamp}", env)
         checkout_res = run_cmd(
             ["git", "checkout", "-b", branch_name],
@@ -1497,12 +1673,17 @@ def _execute_single_repo_upgrade(
             )
         created_branch = branch_name
 
-        add_stage_res = run_cmd(["git", "add", "-A"], cwd=wt_dir, timeout=DEFAULT_TIMEOUT_SECONDS, env=env)
+        add_stage_res = run_cmd(
+            ["git", "add", "--", *changed_files],
+            cwd=wt_dir,
+            timeout=DEFAULT_TIMEOUT_SECONDS,
+            env=env,
+        )
         if not add_stage_res.ok:
             detail = add_stage_res.stderr.strip() or add_stage_res.stdout.strip()
             return _error_result(
                 str(repo_root),
-                f"git add -A failed: {detail}",
+                f"git add -- ... failed: {detail}",
                 base_ref=base_ref,
                 used_agcoord=use_agc,
                 gate=profile.gate,
@@ -1611,7 +1792,7 @@ def _execute_single_repo_upgrade(
                 "-lc",
                 profile.gate,
             ]
-            land_res = run_cmd(land_cmd, cwd=wt_dir, timeout=GATE_TIMEOUT_SECONDS, env=gate_env)
+            land_res = run_cmd(land_cmd, cwd=wt_dir, timeout=gate_timeout, env=gate_env)
 
         if not land_res.ok:
             detail = land_res.stderr.strip() or land_res.stdout.strip() or f"exit code {land_res.returncode}"
@@ -1679,12 +1860,17 @@ def upgrade_repos(
     upgrade_locks: bool = True,
     land: bool = False,
     file_issues: bool = False,
+    gate_timeout: float = GATE_TIMEOUT_SECONDS,
     worktree_root: str | os.PathLike[str] | None = None,
     log_dir: str | os.PathLike[str] | None = None,
     dry_run: bool = False,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run an isolated-worktree policy and dependency upgrade sweep across target repositories."""
+
+    if not is_finite_number(gate_timeout) or float(gate_timeout) <= 0:
+        raise GardeniaError("--gate-timeout must be a finite number > 0.", exit_code=2)
+    effective_gate_timeout = float(gate_timeout)
 
     validated_packages = validate_packages(packages)
     effective_env = _effective_env(env)
@@ -1715,6 +1901,7 @@ def upgrade_repos(
                     upgrade_locks=upgrade_locks,
                     land=land,
                     file_issues=file_issues,
+                    gate_timeout=effective_gate_timeout,
                     wt_root=resolved_wt_root,
                     resolved_log_dir=resolved_log_dir,
                     env=effective_env,
@@ -1742,6 +1929,7 @@ def upgrade_repos(
             "upgrade_locks": upgrade_locks,
             "land": land,
             "file_issues": file_issues,
+            "gate_timeout": effective_gate_timeout,
             "worktree_root": str(resolved_wt_root),
             "log_dir": str(resolved_log_dir),
         },

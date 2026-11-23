@@ -27,6 +27,7 @@ PLUGIN_PACKAGES: tuple[str, ...] = ("agrein", "agcoord", "howhard", "agroute")
 CLI_WITH_PLUGINS: tuple[str, ...] = ("howhard", "agroute", "agcoord")
 
 DEFAULT_TIMEOUT_SECONDS = 5.0
+DEFAULT_TMPFS_INODES = 262144
 
 
 @dataclass(frozen=True)
@@ -197,11 +198,13 @@ def run_cmd(
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout.decode(errors="replace") if exc.stdout else "")
         stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr.decode(errors="replace") if exc.stderr else "")
+        timeout_note = f"Command timed out after {timeout}s"
+        stderr = f"{stderr.rstrip()}\n{timeout_note}" if stderr.strip() else timeout_note
         return CommandResult(
             ok=False,
             returncode=None,
             stdout=stdout,
-            stderr=stderr or f"Command timed out after {timeout}s",
+            stderr=stderr,
             timed_out=True,
             missing=False,
         )

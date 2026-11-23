@@ -46,7 +46,7 @@ def test_repo_render_outside_git_and_routing_modes(tmp_path: Path) -> None:
     assert out.startswith(MANAGED_BEGIN)
     assert out.strip().endswith(MANAGED_END)
     assert "agr candidates --host <codex|claude|agy>" in out
-    assert "--resource cpu=2 --resource memory=2147483648 --resource tmpfs=1073741824 -- pytest -q" in out
+    assert "--resource cpu=2 --resource memory=2147483648 --resource tmpfs=1073741824 --resource tmpfs_inodes=262144 -- pytest -q" in out
     assert "--no-overflow" not in out
     assert "documentation-only change" not in out
 

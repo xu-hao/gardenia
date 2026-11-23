@@ -12,6 +12,7 @@ from gardenia.host import check_host, parse_clients_arg, setup_host
 from gardenia.models import CHECK_FORMAT, Finding, GardeniaError, compute_ok
 from gardenia.repo import check_repo, init_repo, render_repo, try_resolve_git_repo
 from gardenia.repos import (
+    GATE_TIMEOUT_SECONDS,
     add_repos,
     check_repos,
     list_repos,
@@ -334,6 +335,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Open (or reuse an existing open) GitHub issue when a repository gate fails.",
+    )
+    repos_upgrade.add_argument(
+        "--gate-timeout",
+        type=float,
+        default=GATE_TIMEOUT_SECONDS,
+        help=(
+            "Timeout in seconds for each repository gate or agc land command "
+            f"(default: {int(GATE_TIMEOUT_SECONDS)})."
+        ),
     )
     repos_upgrade.add_argument("--worktree-root", default=None, help="Base directory for temporary isolated worktrees (default: /var/tmp or system temp dir).")
     repos_upgrade.add_argument("--log-dir", default=None, help="Directory for persisted failure logs (default: $GARDENIA_LOG_DIR or ~/.local/state/gardenia/logs).")
@@ -749,6 +759,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     upgrade_locks=args.upgrade_locks,
                     land=args.land,
                     file_issues=args.file_issues,
+                    gate_timeout=args.gate_timeout,
                     worktree_root=args.worktree_root,
                     log_dir=args.log_dir,
                     dry_run=args.dry_run,
