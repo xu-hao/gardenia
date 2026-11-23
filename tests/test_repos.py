@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tomllib
 
 from conftest import (
@@ -677,7 +678,8 @@ def test_repos_upgrade_cargo_and_pyproject_venv_paths(tmp_path: Path) -> None:
         """
         import pathlib, stat, sys
         if sys.argv[1:2] == ["venv"]:
-            venv_dir = pathlib.Path(sys.argv[2])
+            venv_targets = [arg for arg in sys.argv[2:] if not arg.startswith("-")]
+            venv_dir = pathlib.Path(venv_targets[0])
             bin_dir = venv_dir / "bin"
             bin_dir.mkdir(parents=True, exist_ok=True)
             marker = bin_dir / "venv-tool"
@@ -852,3 +854,430 @@ def test_repos_upgrade_agcoord_required_missing_and_human_outputs(tmp_path: Path
     assert run_cli(["repos", "check"], cwd=tmp_path, env=env).returncode == 0
     assert run_cli(["repos", "prune", "--dry-run"], cwd=tmp_path, env=env).returncode == 0
     assert run_cli(["repos", "upgrade", "--dry-run"], cwd=tmp_path, env=env).returncode == 1
+
+
+def test_repos_upgrade_uv_seed_multi_extras_and_dependency_groups(tmp_path: Path) -> None:
+    env, _, bin_dir = make_isolated_env(tmp_path)
+    _ensure_bash_in_bin(bin_dir)
+
+    uv_log = tmp_path / "uv.jsonl"
+    make_python_shim(
+        bin_dir,
+        "uv",
+        """
+        import pathlib, stat, sys
+        if sys.argv[1:2] == ["venv"]:
+            if "--seed" not in sys.argv:
+                print("expected --seed flag on uv venv", file=sys.stderr)
+                sys.exit(2)
+            venv_dir = pathlib.Path(sys.argv[-1])
+            vbin = venv_dir / "bin"
+            vbin.mkdir(parents=True, exist_ok=True)
+            py = vbin / "python"
+            py.symlink_to(sys.executable)
+            pip_marker = vbin / "pip"
+            pip_marker.write_text("#!/usr/bin/env bash\\necho pip-seeded\\n", encoding="utf-8")
+            pip_marker.chmod(pip_marker.stat().st_mode | stat.S_IXUSR)
+            sys.exit(0)
+        if sys.argv[1:3] == ["pip", "install"]:
+            sys.exit(0)
+        sys.exit(0)
+        """,
+        log_path=uv_log,
+    )
+
+    multi_repo = init_git_repo(tmp_path / "multi-extra-repo", env)
+    write_executable(
+        multi_repo / "scripts" / "check",
+        "#!/usr/bin/env bash\nset -euo pipefail\ntest \"$(pip)\" = \"pip-seeded\"\n",
+    )
+    (multi_repo / "pyproject.toml").write_text(
+        '[project]\n'
+        'name = "multi-extra"\n'
+        'version = "0.1.0"\n\n'
+        '[project.optional-dependencies]\n'
+        'test = ["pytest>=8"]\n'
+        'docs = ["sphinx>=8"]\n'
+        'dev = ["ruff>=0.9"]\n'
+        'extra = ["ignored-extra"]\n\n'
+        '[dependency-groups]\n'
+        'lint = ["mypy>=1"]\n'
+        'dev = [{include-group = "lint"}, "coverage>=7"]\n',
+        encoding="utf-8",
+    )
+    (multi_repo / "docs").mkdir(parents=True, exist_ok=True)
+    (multi_repo / "docs" / "requirements.txt").write_text("alabaster>=1\n", encoding="utf-8")
+    run_cli(["repo", "init", "--repo", str(multi_repo), "--agcoord", "none", "--save-config", "--no-register"], cwd=tmp_path, env=env)
+    _git(multi_repo, env, "add", "-A")
+    _git(multi_repo, env, "commit", "-m", "Init multi-extra repo")
+
+    dev_docs_repo = init_git_repo(tmp_path / "dev-and-docs-req-repo", env)
+    write_executable(dev_docs_repo / "scripts" / "check", "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n")
+    (dev_docs_repo / "pyproject.toml").write_text(
+        '[project]\n'
+        'name = "dev-only"\n'
+        'version = "0.1.0"\n\n'
+        '[project.optional-dependencies]\n'
+        'dev = ["pytest>=8"]\n',
+        encoding="utf-8",
+    )
+    (dev_docs_repo / "docs").mkdir(parents=True, exist_ok=True)
+    (dev_docs_repo / "docs" / "requirements.txt").write_text("sphinx>=8\n", encoding="utf-8")
+    run_cli(["repo", "init", "--repo", str(dev_docs_repo), "--agcoord", "none", "--save-config", "--no-register"], cwd=tmp_path, env=env)
+    _git(dev_docs_repo, env, "add", "-A")
+    _git(dev_docs_repo, env, "commit", "-m", "Init dev-only repo")
+
+    wt_root = tmp_path / "wt-root"
+    proc = run_cli(
+        [
+            "repos",
+            "upgrade",
+            "--repo",
+            str(multi_repo),
+            "--repo",
+            str(dev_docs_repo),
+            "--worktree-root",
+            str(wt_root),
+            "--json",
+        ],
+        cwd=tmp_path,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    data = json.loads(proc.stdout)
+    by_name = {r["name"]: r for r in data["repos"]}
+    assert by_name["multi-extra-repo"]["status"] == "up_to_date"
+    assert by_name["dev-and-docs-req-repo"]["status"] == "up_to_date"
+
+    uv_calls = _read_jsonl(uv_log)
+    venv_calls = [c["argv"] for c in uv_calls if c["argv"][1:2] == ["venv"]]
+    assert len(venv_calls) == 2
+    assert all(call[1:3] == ["venv", "--seed"] for call in venv_calls)
+
+    pip_calls = [c["argv"] for c in uv_calls if c["argv"][1:3] == ["pip", "install"]]
+    multi_pip = [c for c in pip_calls if ".[test,docs,dev]" in c]
+    assert len(multi_pip) == 1
+    assert "mypy>=1" in multi_pip[0]
+    assert "coverage>=7" in multi_pip[0]
+    assert "ignored-extra" not in multi_pip[0]
+    assert "docs/requirements.txt" not in multi_pip[0]
+
+    dev_docs_pip = [c for c in pip_calls if ".[dev]" in c]
+    assert len(dev_docs_pip) == 1
+    assert "-r" in dev_docs_pip[0]
+    assert "docs/requirements.txt" in dev_docs_pip[0]
+    assert list(wt_root.iterdir()) == []
+
+
+def test_repos_upgrade_pep735_dependency_groups_without_project(tmp_path: Path) -> None:
+    env, _, bin_dir = make_isolated_env(tmp_path)
+    _ensure_bash_in_bin(bin_dir)
+
+    uv_log = tmp_path / "uv.jsonl"
+    make_python_shim(
+        bin_dir,
+        "uv",
+        """
+        import pathlib, sys
+        if sys.argv[1:3] == ["venv", "--seed"]:
+            venv_dir = pathlib.Path(sys.argv[3])
+            vbin = venv_dir / "bin"
+            vbin.mkdir(parents=True, exist_ok=True)
+            (vbin / "python").symlink_to(sys.executable)
+            sys.exit(0)
+        if sys.argv[1:3] == ["pip", "install"]:
+            sys.exit(0)
+        sys.exit(0)
+        """,
+        log_path=uv_log,
+    )
+
+    agrein_like = init_git_repo(tmp_path / "agrein-like", env)
+    write_executable(
+        agrein_like / "scripts" / "check",
+        "#!/usr/bin/env bash\nset -euo pipefail\ntest -n \"${VIRTUAL_ENV:-}\"\n",
+    )
+    (agrein_like / "pyproject.toml").write_text(
+        '[dependency-groups]\n'
+        'typing = ["mypy>=1.10"]\n'
+        'test = ["pytest>=8", {include-group = "typing"}]\n'
+        'dev = [{include-group = "test"}, "PyYAML>=6"]\n',
+        encoding="utf-8",
+    )
+    (agrein_like / "docs").mkdir(parents=True, exist_ok=True)
+    (agrein_like / "docs" / "requirements.txt").write_text("sphinx>=8\nfuro\n", encoding="utf-8")
+    run_cli(["repo", "init", "--repo", str(agrein_like), "--agcoord", "none", "--save-config", "--no-register"], cwd=tmp_path, env=env)
+    _git(agrein_like, env, "add", "-A")
+    _git(agrein_like, env, "commit", "-m", "Init PEP 735 tool repo")
+
+    empty_no_project = init_git_repo(tmp_path / "empty-no-project", env)
+    write_executable(empty_no_project / "scripts" / "check", "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n")
+    (empty_no_project / "pyproject.toml").write_text('[tool.pytest.ini_options]\ntestpaths = ["tests"]\n', encoding="utf-8")
+    run_cli(["repo", "init", "--repo", str(empty_no_project), "--agcoord", "none", "--save-config", "--no-register"], cwd=tmp_path, env=env)
+    _git(empty_no_project, env, "add", "-A")
+    _git(empty_no_project, env, "commit", "-m", "Init empty tool pyproject")
+
+    wt_root = tmp_path / "wt-root"
+    proc = run_cli(
+        [
+            "repos",
+            "upgrade",
+            "--repo",
+            str(agrein_like),
+            "--repo",
+            str(empty_no_project),
+            "--worktree-root",
+            str(wt_root),
+            "--json",
+        ],
+        cwd=tmp_path,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    by_name = {r["name"]: r for r in json.loads(proc.stdout)["repos"]}
+    assert by_name["agrein-like"]["status"] == "up_to_date"
+    assert by_name["empty-no-project"]["status"] == "up_to_date"
+
+    uv_calls = _read_jsonl(uv_log)
+    pip_calls = [c["argv"] for c in uv_calls if c["argv"][1:3] == ["pip", "install"]]
+    assert len(pip_calls) == 1
+    install_argv = pip_calls[0]
+    assert "-e" not in install_argv
+    assert "." not in install_argv
+    assert "--upgrade" in install_argv
+    assert "pytest>=8" in install_argv
+    assert "mypy>=1.10" in install_argv
+    assert "PyYAML>=6" in install_argv
+    assert install_argv.count("mypy>=1.10") == 1
+    assert "-r" in install_argv
+    assert "docs/requirements.txt" in install_argv
+
+    # Cyclic include-group references fail cleanly per-repo without crashing the CLI.
+    cyclic = init_git_repo(tmp_path / "cyclic-groups", env)
+    write_executable(cyclic / "scripts" / "check", "#!/usr/bin/env bash\nexit 0\n")
+    (cyclic / "pyproject.toml").write_text(
+        '[dependency-groups]\n'
+        'a = [{include-group = "b"}]\n'
+        'b = [{include-group = "a"}]\n'
+        'dev = [{include-group = "a"}]\n',
+        encoding="utf-8",
+    )
+    run_cli(["repo", "init", "--repo", str(cyclic), "--agcoord", "none", "--save-config", "--no-register"], cwd=tmp_path, env=env)
+    _git(cyclic, env, "add", "-A")
+    _git(cyclic, env, "commit", "-m", "Init cyclic dependency groups")
+
+    cyc_proc = run_cli(
+        ["repos", "upgrade", "--repo", str(cyclic), "--worktree-root", str(wt_root), "--json"],
+        cwd=tmp_path,
+        env=env,
+    )
+    assert cyc_proc.returncode == 1
+    cyc_entry = json.loads(cyc_proc.stdout)["repos"][0]
+    assert cyc_entry["status"] == "error"
+    assert "Cyclic include-group" in cyc_entry["error"]
+    assert list(wt_root.iterdir()) == []
+
+
+def test_repos_upgrade_pre_gate_changed_files_ignores_gate_debris_and_stages_only_changed(tmp_path: Path) -> None:
+    env, _, bin_dir = make_isolated_env(tmp_path)
+    _ensure_bash_in_bin(bin_dir)
+
+    agc_log = tmp_path / "agc.jsonl"
+    gh_log = tmp_path / "gh.jsonl"
+    gh_state = tmp_path / "gh-state.json"
+    _install_agc_shim(bin_dir, agc_log)
+
+    # Custom gh shim that records whether untracked gate debris was already removed before PR creation.
+    debris_report = tmp_path / "gh-debris-check.json"
+    make_python_shim(
+        bin_dir,
+        "gh",
+        f"""
+        import json, pathlib, sys
+        state_file = pathlib.Path({str(gh_state)!r})
+        report_file = pathlib.Path({str(debris_report)!r})
+        state = json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {{"next_issue": 10, "next_pr": 100, "issues": [], "prs": [], "merged": []}}
+
+        def save():
+            state_file.write_text(json.dumps(state), encoding="utf-8")
+
+        def get_opt(args, flag, default=""):
+            if flag in args:
+                idx = args.index(flag)
+                if idx + 1 < len(args):
+                    return args[idx + 1]
+            return default
+
+        argv = sys.argv[1:]
+        if argv[:2] == ["issue", "create"]:
+            num = state["next_issue"]
+            state["next_issue"] += 1
+            save()
+            print(f"https://github.com/example/repo/issues/{{num}}")
+            sys.exit(0)
+        if argv[:2] == ["pr", "create"]:
+            num = state["next_pr"]
+            state["next_pr"] += 1
+            save()
+            report_file.write_text(json.dumps({{
+                "gate_artifacts_exists": pathlib.Path("gate_artifacts").exists(),
+                "stray_tmp_exists": pathlib.Path("stray.tmp").exists(),
+            }}), encoding="utf-8")
+            print(f"https://github.com/example/repo/pull/{{num}}")
+            sys.exit(0)
+        if argv[:2] == ["pr", "merge"]:
+            save()
+            print("Merged")
+            sys.exit(0)
+        sys.exit(2)
+        """,
+        log_path=gh_log,
+    )
+
+    debris_gate = (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"{sys.executable!r} -c \""
+        "import pathlib; "
+        "pathlib.Path('gate_artifacts/nested').mkdir(parents=True, exist_ok=True); "
+        "pathlib.Path('gate_artifacts/nested/report.txt').write_text('artifact\\n', encoding='utf-8'); "
+        "pathlib.Path('stray.tmp').write_text('stray\\n', encoding='utf-8'); "
+        "open('README.md', 'a', encoding='utf-8').write('gate touched\\n')"
+        "\"\n"
+    )
+
+    clean_repo, _ = _init_repo_with_bare_origin(
+        tmp_path,
+        "clean-debris",
+        env,
+        gate_body=debris_gate,
+        agcoord="none",
+        stale_agents=False,
+    )
+    drifted_repo, bare_drifted = _init_repo_with_bare_origin(
+        tmp_path,
+        "drifted-debris",
+        env,
+        gate_body=debris_gate,
+        agcoord="auto",
+        docs_exemption=True,
+        stale_agents=True,
+    )
+
+    wt_root = tmp_path / "wt-root"
+
+    # 1. Without --land: clean repo reports up_to_date (ignoring gate debris); drifted repo reports only AGENTS.md.
+    verify_proc = run_cli(
+        [
+            "repos",
+            "upgrade",
+            "--repo",
+            str(clean_repo),
+            "--repo",
+            str(drifted_repo),
+            "--worktree-root",
+            str(wt_root),
+            "--json",
+        ],
+        cwd=tmp_path,
+        env=env,
+    )
+    assert verify_proc.returncode == 0, verify_proc.stdout + verify_proc.stderr
+    v_by_name = {r["name"]: r for r in json.loads(verify_proc.stdout)["repos"]}
+    assert v_by_name["clean-debris"]["status"] == "up_to_date"
+    assert v_by_name["clean-debris"]["changed_files"] == []
+    assert v_by_name["drifted-debris"]["status"] == "changes_verified"
+    assert v_by_name["drifted-debris"]["changed_files"] == ["AGENTS.md"]
+
+    # 2. With --land: untracked gate debris is removed before commit, only AGENTS.md is committed/pushed.
+    land_proc = run_cli(
+        [
+            "repos",
+            "upgrade",
+            "--repo",
+            str(drifted_repo),
+            "--land",
+            "--worktree-root",
+            str(wt_root),
+            "--json",
+        ],
+        cwd=tmp_path,
+        env=env,
+    )
+    assert land_proc.returncode == 0, land_proc.stdout + land_proc.stderr
+    land_entry = json.loads(land_proc.stdout)["repos"][0]
+    assert land_entry["status"] == "landed"
+    assert land_entry["changed_files"] == ["AGENTS.md"]
+    assert land_entry["land_method"] == "gh_pr_merge_docs_exemption"
+
+    debris_status = json.loads(debris_report.read_text(encoding="utf-8"))
+    assert debris_status == {"gate_artifacts_exists": False, "stray_tmp_exists": False}
+
+    pushed_branch = land_entry["branch"]
+    committed_files = [
+        line.strip()
+        for line in _git(bare_drifted, env, "show", "--name-only", "--pretty=format:", pushed_branch).splitlines()
+        if line.strip()
+    ]
+    assert committed_files == ["AGENTS.md"]
+    assert list(wt_root.iterdir()) == []
+
+
+def test_repos_upgrade_gate_timeout_cli_forwarding_and_validation(tmp_path: Path) -> None:
+    env, _, bin_dir = make_isolated_env(tmp_path)
+    _ensure_bash_in_bin(bin_dir)
+
+    repo = init_git_repo(tmp_path / "slow-gate", env)
+    write_executable(
+        repo / "scripts" / "check",
+        f"#!/usr/bin/env bash\n{sys.executable!r} -c 'import time; time.sleep(2)'\n",
+    )
+    run_cli(["repo", "init", "--repo", str(repo), "--agcoord", "none", "--save-config", "--no-register"], cwd=tmp_path, env=env)
+    _git(repo, env, "add", "-A")
+    _git(repo, env, "commit", "-m", "Init slow gate repo")
+
+    # Default --gate-timeout in --dry-run JSON is 7200.0.
+    default_dry = run_cli(["repos", "upgrade", "--repo", str(repo), "--dry-run", "--json"], cwd=tmp_path, env=env)
+    assert default_dry.returncode == 0
+    assert json.loads(default_dry.stdout)["options"]["gate_timeout"] == 7200.0
+
+    # Custom --gate-timeout forwards cleanly into options.
+    custom_dry = run_cli(
+        ["repos", "upgrade", "--repo", str(repo), "--gate-timeout", "42.5", "--dry-run", "--json"],
+        cwd=tmp_path,
+        env=env,
+    )
+    assert custom_dry.returncode == 0
+    assert json.loads(custom_dry.stdout)["options"]["gate_timeout"] == 42.5
+
+    # Invalid --gate-timeout values fail with exit code 2.
+    for bad_timeout in ("0", "-5", "nan", "inf"):
+        bad = run_cli(
+            ["repos", "upgrade", "--repo", str(repo), "--gate-timeout", bad_timeout, "--dry-run", "--json"],
+            cwd=tmp_path,
+            env=env,
+        )
+        assert bad.returncode == 2, f"Expected exit 2 for --gate-timeout {bad_timeout!r}"
+
+    # Execution honors --gate-timeout and times out quickly when gate exceeds it.
+    wt_root = tmp_path / "wt-root"
+    timed_out = run_cli(
+        [
+            "repos",
+            "upgrade",
+            "--repo",
+            str(repo),
+            "--gate-timeout",
+            "0.2",
+            "--worktree-root",
+            str(wt_root),
+            "--json",
+        ],
+        cwd=tmp_path,
+        env=env,
+    )
+    assert timed_out.returncode == 1
+    entry = json.loads(timed_out.stdout)["repos"][0]
+    assert entry["status"] == "gate_failed"
+    assert "timed out" in entry["log_excerpt"].lower()
+    assert list(wt_root.iterdir()) == []

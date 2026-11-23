@@ -4,6 +4,27 @@ All notable changes to `gardenia` are documented in this file.
 
 ## Unreleased
 
+## 0.2.1 — 2026-11-22
+
+- Hardened `gardenia repos upgrade` virtual environment provisioning, pre-gate diff
+  isolation, and gate timeouts (`#15`):
+  - Provision temporary virtual environments with `uv venv --seed` so `python -m pip`
+    is available inside repository validation gates.
+  - Updated `pyproject.toml` provisioning to install all present `("test", "docs", "dev")`
+    entries in `[project.optional-dependencies]` (`-e ".[...]"`), resolve PEP 735
+    `[dependency-groups]` (`dev`, `test`, `docs`, including recursive
+    `include-group` entries), and install `-r docs/requirements.txt` when `"docs"` is
+    not already in `[project.optional-dependencies]`; for tool-only repositories without
+    `[project]` in `pyproject.toml`, skip `-e .` and install `[dependency-groups]` plus
+    `docs/requirements.txt` with `--upgrade`.
+  - Capture `changed_files` before running `profile.gate`, remove untracked gate
+    artifacts before creating `--land` branches/commits, and stage only `changed_files`
+    (`git add -- ...`) instead of `git add -A`.
+  - Raised default `GATE_TIMEOUT_SECONDS` from `1800.0` to `7200.0` and added
+    `--gate-timeout SECONDS`.
+- Replaced `docs/assets/gardenia.svg` with five fractal-sized outlined hexagons along an
+  open arc and updated provenance in `docs/assets/README.md` (`#16`).
+
 ## 0.2.0 — 2026-11-22
 
 - Added `gardenia repos` multi-repository host registry, fleet check, and

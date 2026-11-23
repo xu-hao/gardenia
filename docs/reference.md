@@ -17,7 +17,7 @@
 gardenia --version
 ```
 
-Prints `gardenia 0.2.0` and exits `0`.
+Prints `gardenia 0.2.1` and exits `0`.
 
 ## `gardenia host check`
 
@@ -214,6 +214,7 @@ gardenia repos upgrade \
   [--upgrade-locks | --no-upgrade-locks] \
   [--land] \
   [--file-issues] \
+  [--gate-timeout SECONDS] \
   [--worktree-root DIR] \
   [--log-dir DIR] \
   [--dry-run] \
@@ -226,13 +227,25 @@ gardenia repos upgrade \
 | `--repo PATH` | unset | Explicit target repository path (repeatable; overrides `repos.toml`). |
 | `--package PKG` | unset | Specific package to upgrade (repeatable; validated against whitespace and shell metacharacters). |
 | `--sync-policy` / `--no-sync-policy` | enabled | Refresh `AGENTS.md` / `CLAUDE.md` via `init_repo(..., allow_worktree=True, register=False)` inside the temporary worktree. |
-| `--upgrade-locks` / `--no-upgrade-locks` | enabled | Refresh `uv.lock` (`uv lock --upgrade` / `--upgrade-package`), `Cargo.lock` (`cargo update` / `-p`), or provision an isolated test virtualenv for unpinned `pyproject.toml` repositories. |
+| `--upgrade-locks` / `--no-upgrade-locks` | enabled | Refresh `uv.lock` (`uv lock --upgrade` / `--upgrade-package`), `Cargo.lock` (`cargo update` / `-p`), or provision an isolated seeded test virtualenv (`uv venv --seed`) for `pyproject.toml` repositories without `uv.lock`. |
 | `--land` | disabled | Commit verified updates on `gardenia-upgrade-<timestamp>`, push to `origin`, open a tracking issue and PR (`Closes #<N>`), and land via `agc land` (or `gh pr merge --merge --delete-branch` when all changed files qualify under `docs_exemption` or `agc` is not active). |
 | `--file-issues` | disabled | When a repository gate fails, open a GitHub issue via `gh` (or reuse an existing open issue with the same upgrade-failure title). |
+| `--gate-timeout SECONDS` | `7200.0` | Timeout in seconds for each repository validation gate and `agc land` invocation (must be finite and `> 0`). |
 | `--worktree-root DIR` | `/var/tmp` (or temp dir) | Base directory for temporary isolated worktrees (cleaned up unconditionally in `finally`). |
 | `--log-dir DIR` | `$GARDENIA_LOG_DIR` or `${XDG_STATE_HOME:-~/.local/state}/gardenia/logs` | Directory where failed gate logs are persisted. |
 | `--dry-run` | disabled | Inspect target repositories read-only and report planned steps without creating worktrees or running gates. |
 | `--json` | disabled | Emit `gardenia-repos-upgrade-v1` JSON. |
+
+Virtual environment provisioning for `pyproject.toml` repositories without `uv.lock`:
+
+- Temporary virtual environments are created with `uv venv --seed <venv>` so `python -m pip` is available inside repository gate commands.
+- When `[project]` is present in `pyproject.toml`, `gardenia` collects every present key among `("test", "docs", "dev")` in `[project.optional-dependencies]` and installs `-e ".[<extras>]"` (or `-e .` when none are defined), together with any requirements from `[dependency-groups]` (`dev`, `test`, `docs`, resolving `{"include-group": ...}` recursively) and `-r docs/requirements.txt` if present and `"docs"` was not already in `[project.optional-dependencies]`.
+- When `[project]` is absent from `pyproject.toml` (PEP 735 tool/plugin repositories), editable installation (`-e .`) is skipped; instead, requirements from present `("dev", "test", "docs")` entries in `[dependency-groups]` (plus `-r docs/requirements.txt` if present) are installed with `uv pip install --python <venv_python> --upgrade`.
+
+Pre-gate diff isolation:
+
+- `changed_files` is recorded from `git status --porcelain` inside the isolated worktree after policy sync and lockfile/dependency upgrades, **before** running the validation gate.
+- After the gate succeeds and before creating any `--land` branch or commit, untracked files and directories created by the gate that were not in `changed_files` are removed and only `changed_files` are staged (`git add -- ...`).
 
 Per-repository statuses in `gardenia-repos-upgrade-v1`:
 
@@ -284,7 +297,7 @@ via a sibling temporary file plus `os.replace`. Malformed TOML, unknown keys, wr
 ```json
 {
   "format": "gardenia-check-v1",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "ok": true,
   "strict": false,
   "host": {
