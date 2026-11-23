@@ -18,6 +18,7 @@ from gardenia import __version__
 from gardenia.host import BROKER_PROBE_TIMEOUT_SECONDS
 from gardenia.models import (
     DEFAULT_TIMEOUT_SECONDS,
+    DEFAULT_TMPFS_INODES,
     MANAGED_BEGIN,
     REPOS_CHECK_FORMAT,
     REPOS_LIST_FORMAT,
@@ -765,6 +766,7 @@ def _build_agc_resource_args(profile: RepoProfile) -> list[str]:
     tmpfs = profile.tmpfs_bytes()
     if tmpfs is not None:
         args.extend(["--resource", f"tmpfs={tmpfs}"])
+        args.extend(["--resource", f"tmpfs_inodes={DEFAULT_TMPFS_INODES}"])
     return args
 
 

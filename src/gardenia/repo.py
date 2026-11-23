@@ -14,6 +14,7 @@ from gardenia import __version__
 from gardenia.models import (
     CHECK_FORMAT,
     DEFAULT_TIMEOUT_SECONDS,
+    DEFAULT_TMPFS_INODES,
     MANAGED_BEGIN,
     MANAGED_END,
     Finding,
@@ -358,6 +359,7 @@ def _format_agc_flags(profile: RepoProfile) -> str:
     tmpfs = profile.tmpfs_bytes()
     if tmpfs is not None:
         parts.append(f"--resource tmpfs={tmpfs}")
+        parts.append(f"--resource tmpfs_inodes={DEFAULT_TMPFS_INODES}")
     return " ".join(parts)
 
 

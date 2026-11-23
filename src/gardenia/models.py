@@ -27,6 +27,7 @@ PLUGIN_PACKAGES: tuple[str, ...] = ("agrein", "agcoord", "howhard", "agroute")
 CLI_WITH_PLUGINS: tuple[str, ...] = ("howhard", "agroute", "agcoord")
 
 DEFAULT_TIMEOUT_SECONDS = 5.0
+DEFAULT_TMPFS_INODES = 262144
 
 
 @dataclass(frozen=True)

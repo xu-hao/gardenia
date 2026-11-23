@@ -1281,3 +1281,53 @@ def test_repos_upgrade_gate_timeout_cli_forwarding_and_validation(tmp_path: Path
     assert entry["status"] == "gate_failed"
     assert "timed out" in entry["log_excerpt"].lower()
     assert list(wt_root.iterdir()) == []
+
+
+def test_repos_upgrade_agc_includes_tmpfs_inodes_when_tmpfs_gb_set(tmp_path: Path) -> None:
+    env, _, bin_dir = make_isolated_env(tmp_path)
+    _ensure_bash_in_bin(bin_dir)
+
+    agc_log = tmp_path / "agc.jsonl"
+    gh_log = tmp_path / "gh.jsonl"
+    gh_state = tmp_path / "gh-state.json"
+    _install_agc_shim(bin_dir, agc_log)
+    _install_gh_shim(bin_dir, gh_state, gh_log)
+
+    repo, _ = _init_repo_with_bare_origin(
+        tmp_path,
+        "tmpfs-repo",
+        env,
+        agcoord="required",
+        docs_exemption=False,
+        stale_agents=True,
+    )
+    run_cli(
+        ["repo", "init", "--repo", str(repo), "--agcoord", "required", "--tmpfs-gb", "2", "--save-config", "--no-register"],
+        cwd=tmp_path,
+        env=env,
+    )
+    (repo / "AGENTS.md").write_text(f"# tmpfs-repo\n\n{MANAGED_BEGIN}\nstale\n{MANAGED_END}\n", encoding="utf-8")
+    _git(repo, env, "add", "-A")
+    _git(repo, env, "commit", "-m", "Configure tmpfs_gb=2 with stale AGENTS.md")
+    _git(repo, env, "push", "origin", "main")
+
+    wt_root = tmp_path / "wt-root"
+    proc = run_cli(
+        ["repos", "upgrade", "--repo", str(repo), "--land", "--worktree-root", str(wt_root), "--json"],
+        cwd=tmp_path,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    entry = json.loads(proc.stdout)["repos"][0]
+    assert entry["status"] == "landed"
+    assert entry["land_method"] == "agc_land"
+
+    agc_calls = _read_jsonl(agc_log)
+    run_calls = [c["argv"] for c in agc_calls if len(c["argv"]) > 1 and c["argv"][1] == "run"]
+    land_calls = [c["argv"] for c in agc_calls if len(c["argv"]) > 1 and c["argv"][1] == "land"]
+    assert len(run_calls) == 1
+    assert len(land_calls) == 1
+    for argv in (run_calls[0], land_calls[0]):
+        assert "tmpfs=2147483648" in argv
+        assert "tmpfs_inodes=262144" in argv
+    assert list(wt_root.iterdir()) == []

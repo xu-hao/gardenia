@@ -22,6 +22,9 @@ All notable changes to `gardenia` are documented in this file.
     (`git add -- ...`) instead of `git add -A`.
   - Raised default `GATE_TIMEOUT_SECONDS` from `1800.0` to `7200.0` and added
     `--gate-timeout SECONDS`.
+  - Appended `--resource tmpfs_inodes=262144` whenever `tmpfs_gb` is set in both
+    rendered `AGENTS.md` `agc` commands (`gardenia repo init|render`) and
+    `gardenia repos upgrade` (`agc run` / `agc land`).
 - Replaced `docs/assets/gardenia.svg` with five fractal-sized outlined hexagons along an
   open arc and updated provenance in `docs/assets/README.md` (`#16`).
 

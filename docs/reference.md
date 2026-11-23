@@ -128,7 +128,7 @@ Shared profile options:
 | `--gate CMD` | `bash scripts/check` | Full validation command for checks and landing. |
 | `--cpu INT` | `4` | CPU claim for `agc run` / `agc land`. |
 | `--memory-gb FLOAT` | `4.0` | Memory claim in GiB (rendered as exact integer bytes for `agc --resource memory=<bytes>`). |
-| `--tmpfs-gb FLOAT` | unset | Optional tmpfs claim in GiB (rendered as exact integer bytes when set). |
+| `--tmpfs-gb FLOAT` | unset | Optional tmpfs claim in GiB (rendered as exact integer bytes alongside `--resource tmpfs_inodes=262144` when set). |
 | `--no-overflow` / `--allow-overflow` | `--no-overflow` | Include or omit `--no-overflow` in `agc` commands. |
 | `--routing MODE` | `agroute` | `agroute` (full 5-step `agr` + `howhard` delegation), `howhard` (native `howhard` only), or `none`. |
 | `--agcoord MODE` | `auto` | `auto` (use `agc` on Linux, direct gate elsewhere), `required`, or `none`. |
