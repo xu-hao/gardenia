@@ -8,9 +8,9 @@
 
 `gardenia` is the zero-dependency bootstrapper, repository initializer, verifier, and
 canonical full-stack guide for a five-tool coding-agent ecosystem: **`agrein`**,
-**`agroute` (`agr`)**, **`howhard`**, **`agcoord` (`agc`)**, and **`gardenia`**.
+**`agroute`**, **`howhard`**, **`agcoord`**, and **`gardenia`**.
 
-Together, these tools let you run coding agents across real repositories and multi-ticket
+Together, these tools let you run a mixture of different coding agents across real repositories and multi-ticket
 epics without trashing your working tree, blowing through one subscription's rate limit,
 overpaying for simple changes, starving your Linux workstation of RAM, or leaking
 home-directory paths into Git.
@@ -21,7 +21,7 @@ Running autonomous coding agents on real codebases hits five distinct failure mo
 
 1. **Workspace and workflow chaos** — Left unguided, agents edit your primary checkout
    while you are reading it, patch surface symptoms without a failing reproduction test,
-   spawn subagents that recursively spawn more subagents, or quietly invent product
+   or quietly invent product
    policies and mutate live state instead of asking the owner. Addressed by **`agrein`**.
 2. **Blind subscription and quota burnout** — Pinning every task to one default model
    drains a single client's 5-hour session window, 7-day weekly cap, or dollar credit
@@ -53,7 +53,7 @@ to an LLM cost model or baking user-home paths into repository commits.
 
 ## Each tool in plain English
 
-### `agrein` (*“a grain”*)
+### `agrein`
 
 - **Problem solved:** Stops agents from improvising destructive repository habits — editing
   the primary checkout, skipping issue tracking, fixing bugs without reproducing them
@@ -80,7 +80,7 @@ to an LLM cost model or baking user-home paths into repository commits.
   has **zero** Python runtime, background daemon, or mutable state store, and it never
   chooses models, inspects quotas, or enforces OS resource limits.
 
-### `agroute` (`agr`, *“a root”*)
+### `agroute`
 
 - **Problem solved:** Keeps delegated work inside your real subscription limits and dollar
   credit reserves across Codex (`codex`), Claude Code (`claude`), and Antigravity (`agy`),
@@ -138,7 +138,7 @@ to an LLM cost model or baking user-home paths into repository commits.
   It never inspects multi-client subscription quotas, never launches subagents, and never
   manages OS CPU/memory limits or Git merges.
 
-### `agcoord` (`agc`, *“a gourd”*)
+### `agcoord`
 
 - **Problem solved:** Prevents concurrent agent test runs from starving a shared Linux
   machine of CPU, RAM, or `tmpfs`, and prevents pull requests from merging on stale or
