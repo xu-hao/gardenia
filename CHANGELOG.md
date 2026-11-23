@@ -4,6 +4,10 @@ All notable changes to `gardenia` are documented in this file.
 
 ## Unreleased
 
+- Pass explicit human-readable `--label` flags in rendered `AGENTS.md` `agc run` /
+  `agc land` blocks (with queue-display guidance for `agc list` and `agc tui`) and in
+  `gardenia repos upgrade` invocations (`#23`).
+
 ## 0.2.1 — 2026-11-22
 
 - Hardened `gardenia repos upgrade` virtual environment provisioning, pre-gate diff

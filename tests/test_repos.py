@@ -128,6 +128,20 @@ def _install_agc_shim(bin_dir: Path, log_path: Path) -> None:
                 print("missing -- separator", file=sys.stderr)
                 sys.exit(2)
             sep = argv.index("--")
+            pre_sep = argv[:sep]
+            label_val = None
+            if "--label" in pre_sep:
+                idx = pre_sep.index("--label")
+                if idx + 1 < len(pre_sep):
+                    label_val = pre_sep[idx + 1]
+            else:
+                for arg in pre_sep:
+                    if arg.startswith("--label="):
+                        label_val = arg.split("=", 1)[1]
+                        break
+            if label_val is None or not label_val.strip():
+                print(f"agc {argv[0]} requires a non-empty --label before --", file=sys.stderr)
+                sys.exit(2)
             cmd = argv[sep + 1 :]
             proc = subprocess.run(cmd, env=os.environ)
             sys.exit(proc.returncode)
@@ -592,6 +606,13 @@ def test_repos_upgrade_changes_verified_and_land_with_agc_and_docs_exemption(tmp
     uv_calls = _read_jsonl(uv_log)
     assert any(c["argv"][1:] == ["lock", "--upgrade-package", "howhard"] for c in uv_calls)
 
+    # Verify agc run received explicit human-readable --label for each repository.
+    verify_agc_calls = _read_jsonl(agc_log)
+    verify_run_calls = [c["argv"] for c in verify_agc_calls if len(c["argv"]) > 1 and c["argv"][1] == "run"]
+    assert len(verify_run_calls) == 2
+    assert verify_run_calls[0][1:4] == ["run", "--label", "upgrade gate (repo-docs)"]
+    assert verify_run_calls[1][1:4] == ["run", "--label", "upgrade gate (repo-lock)"]
+
     # Clear logs before testing --land.
     agc_log.unlink(missing_ok=True)
     gh_log.unlink(missing_ok=True)
@@ -633,7 +654,13 @@ def test_repos_upgrade_changes_verified_and_land_with_agc_and_docs_exemption(tmp
     agc_calls = _read_jsonl(agc_log)
     agc_land_calls = [c["argv"] for c in agc_calls if len(c["argv"]) > 1 and c["argv"][1] == "land"]
     assert len(agc_land_calls) == 1
-    assert str(l_by_name["repo-lock"]["pr_number"]) in agc_land_calls[0]
+    lock_pr_ref = str(l_by_name["repo-lock"]["pr_number"])
+    assert agc_land_calls[0][1:5] == [
+        "land",
+        lock_pr_ref,
+        "--label",
+        f"land #{lock_pr_ref} upgrade sweep (repo-lock)",
+    ]
     assert "--no-overflow" in agc_land_calls[0]
     assert "memory=4294967296" in agc_land_calls[0]
 
@@ -1327,6 +1354,9 @@ def test_repos_upgrade_agc_includes_tmpfs_inodes_when_tmpfs_gb_set(tmp_path: Pat
     land_calls = [c["argv"] for c in agc_calls if len(c["argv"]) > 1 and c["argv"][1] == "land"]
     assert len(run_calls) == 1
     assert len(land_calls) == 1
+    assert run_calls[0][1:4] == ["run", "--label", "upgrade gate (tmpfs-repo)"]
+    pr_num = entry["pr_number"]
+    assert land_calls[0][1:5] == ["land", str(pr_num), "--label", f"land #{pr_num} upgrade sweep (tmpfs-repo)"]
     for argv in (run_calls[0], land_calls[0]):
         assert "tmpfs=2147483648" in argv
         assert "tmpfs_inodes=262144" in argv
