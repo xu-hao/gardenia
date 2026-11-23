@@ -2,7 +2,6 @@
 
 <img src="docs/assets/gardenia.svg" alt="gardenia fractal mark" width="160" height="160">
 
-*Where the grain (`agrein`), gourd (`agcoord`), root (`agroute`), and `howhard` grow together.*
 
 [Read the documentation](https://gardenia.readthedocs.io/en/latest/).
 
