@@ -7,10 +7,11 @@
 ```
 
 - A digital artifact factory in a box.
-- Standardized workflows that address common agentic coding pitfalls.
-- Agent-agnostic routing across coding agents — currently supports `Claude Code`, `Codex`, and `Antigravity`.
-- Automatically learns and picks the agent, model, and effort level for each task.
-- Manages local host and remote overflow resources for CPU- and memory-intensive jobs.
+- Standardized workflow that addresses common agentic coding pitfalls.
+- Agent-agnostic and supports routing between different agents (`Claude Code`, `Codex`, `Antigravity`).
+- Automatically learns and picks the agent, model, and effort level for tasks.
+- Manages host and remote resources for CPU- and memory-intensive jobs.
+- Merge queue for landing concurrent pull requests.
 
 `gardenia` is the zero-dependency bootstrapper, repository initializer, verifier, and
 canonical full-stack guide for the five-tool coding-agent ecosystem behind that factory:
@@ -21,6 +22,17 @@ repositories and multi-ticket epics without trashing your working tree, blowing 
 subscription's rate limit, overpaying for simple changes, starving your Linux workstation
 of CPU or RAM (or stranding heavy jobs when remote overflow runners are configured), or
 leaking home-directory paths into Git.
+
+## Who runs what: you vs. your coding agents
+
+- **What you run:** You run **`gardenia`** (`gardenia host`, `gardenia repo`,
+  `gardenia repos`, and `gardenia check`) to set up your machine, onboard or check
+  repositories, and run fleet upgrades. To watch live agent activity, open the two
+  terminal UIs: **`agr tui`** (model routing and subscription usage limits) and
+  **`agc tui`** (machine job queue, resource usage, and merge queue).
+- **What your coding agents run:** **`agrein`**, **`agroute`**, **`howhard`**, and
+  **`agcoord`** are installed **for your coding agents** (`Claude Code`, `Codex`, and
+  `Antigravity`) to run on their own during ticket work.
 
 ## Why five focused tools instead of a monolith
 
@@ -113,6 +125,8 @@ commits.
     non-interactive CLI command (`codex exec`, `claude -p`, or `agy -p` when
     `target_agent != host_agent`), alongside a `feedback` block (`matched_receipt` or
     `raw_native`).
+  - `agr tui`: live terminal UI for watching active model routes and subscription usage
+    limits.
 - **Exact boundary:** Owns host quota and reserve settings in
   `${XDG_CONFIG_HOME:-~/.config}/agroute/config.toml`, optional tracked project overrides
   in `agroute.toml`, and per-clone route/usage/price state under `<git-common-dir>/agroute/`
@@ -168,11 +182,14 @@ commits.
     remote SSH containers, Google Cloud Batch VMs, or Google Cloud Run jobs within
     per-pool runtime and daily CPU-hour budgets, while `--no-overflow` pins local-only
     gates to the host machine.
-  - `agc land <pr>` — holds the repository's landing barrier and declared resources across
-    one atomic gate-and-publish step: syncing the current target branch into the pull
-    request (or refusing stale heads), running the full validation gate once on the exact
-    resulting tree, and merging only when the gate exits `0` (publishing nothing on
-    `gate-failed`, `stale-main`, `head-changed`, or `overflow-executor-failed`).
+  - `agc land <pr>` — merge queue that holds the repository's landing barrier and
+    declared resources across one gate-and-publish step: syncing the current target
+    branch into the pull request (or refusing stale heads), running the full validation
+    gate once on the exact resulting tree, and merging only when the gate exits `0`
+    (publishing nothing on `gate-failed`, `stale-main`, `head-changed`, or
+    `overflow-executor-failed`).
+  - `agc tui`: live terminal UI for watching the machine job queue,
+    CPU/memory/`tmpfs` usage, and the merge queue.
 - **Exact boundary:** Owns workstation job admission, local `cgroup-v2` isolation, remote
   overflow pool placement and budget accounting, durable run logs under
   `${XDG_STATE_HOME:-~/.local/state}/agcoord`, and atomic pull-request publication. It
