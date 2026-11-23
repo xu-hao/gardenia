@@ -48,12 +48,13 @@ or `howhard`, and never calls `agc` recursively from inside an already admitted 
 |  3. Implement change + focused hermetic tests + docs + CHANGELOG.md                      |
 |  4. Run coordinated validation (local cgroup-v2 or remote overflow; --no-overflow        |
 |     pins repository gates to local execution when configured):                           |
-|     -> agc run --no-overflow --resource cpu=4 --resource memory=4294967296               |
+|     -> agc run --label "<short plain-English summary>" --no-overflow --resource cpu=4    |
+|        --resource memory=4294967296                                                      |
 |        [--resource tmpfs=<bytes> --resource tmpfs_inodes=262144]                         |
 |        -- bash scripts/check                                                             |
 |  5. Open PR ("Closes #N") and gate + merge atomically:                                   |
-|     -> agc land <pr> --no-overflow --resource cpu=4                                      |
-|        --resource memory=4294967296 [...] -- bash scripts/check                          |
+|     -> agc land <pr> --label "land #<pr> <short summary>" --no-overflow                  |
+|        --resource cpu=4 --resource memory=4294967296 [...] -- bash scripts/check         |
 |     (or verify diff & merge via forge when documentation-only exempt)                    |
 |  6. Verify origin/main, issue closure, empty git cherry, clean /var/tmp                  |
 |  7. Return session handoff to coordinator                                                |

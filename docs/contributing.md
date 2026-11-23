@@ -17,7 +17,7 @@ Run the full validation gate through `agcoord` on Linux (using integer bytes for
 claims):
 
 ```sh
-agc run --no-overflow --resource cpu=4 --resource memory=4294967296 -- bash scripts/check
+agc run --label "<short plain-English summary>" --no-overflow --resource cpu=4 --resource memory=4294967296 -- bash scripts/check
 ```
 
 `scripts/check` runs:
@@ -39,7 +39,7 @@ Update affected canonical documents, `gardenia.toml` / `AGENTS.md` (via
 Gate and publish pull requests atomically through one `agc land` command:
 
 ```sh
-agc land <pr> --no-overflow --resource cpu=4 --resource memory=4294967296 -- bash scripts/check
+agc land <pr> --label "land #<pr> <short summary>" --no-overflow --resource cpu=4 --resource memory=4294967296 -- bash scripts/check
 ```
 
 Documentation-only changes follow the narrower exemption in `AGENTS.md`. End changed

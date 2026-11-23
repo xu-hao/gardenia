@@ -46,9 +46,38 @@ def test_repo_render_outside_git_and_routing_modes(tmp_path: Path) -> None:
     assert out.startswith(MANAGED_BEGIN)
     assert out.strip().endswith(MANAGED_END)
     assert "agr candidates --host <codex|claude|agy>" in out
-    assert "--resource cpu=2 --resource memory=2147483648 --resource tmpfs=1073741824 --resource tmpfs_inodes=262144 -- pytest -q" in out
+    assert (
+        '  - Check: `agc run --label "<short plain-English summary>" '
+        '--resource cpu=2 --resource memory=2147483648 --resource tmpfs=1073741824 --resource tmpfs_inodes=262144 -- pytest -q`'
+    ) in out
+    assert (
+        '  - Land: `agc land <pr> --label "land #<pr> <short summary>" '
+        '--resource cpu=2 --resource memory=2147483648 --resource tmpfs=1073741824 --resource tmpfs_inodes=262144 -- pytest -q`'
+    ) in out
+    assert (
+        '  Give every job a short plain-English `--label` for humans in `agc list` and `agc tui`\n'
+        '  (lead with what is checked or landed; omit commit SHAs, branch names, `"pre-land"` tags,\n'
+        '  and file paths).'
+    ) in out
     assert "--no-overflow" not in out
     assert "documentation-only change" not in out
+
+    proc_auto = run_cli(["repo", "render", "--agcoord", "auto"], cwd=tmp_path, env=env)
+    assert proc_auto.returncode == 0, proc_auto.stderr
+    auto_out = proc_auto.stdout
+    assert (
+        '  - Check: `agc run --label "<short plain-English summary>" '
+        '--no-overflow --resource cpu=4 --resource memory=4294967296 -- bash scripts/check`'
+    ) in auto_out
+    assert (
+        '  - Land: `agc land <pr> --label "land #<pr> <short summary>" '
+        '--no-overflow --resource cpu=4 --resource memory=4294967296 -- bash scripts/check`'
+    ) in auto_out
+    assert (
+        '  Give every job a short plain-English `--label` for humans in `agc list` and `agc tui`\n'
+        '  (lead with what is checked or landed; omit commit SHAs, branch names, `"pre-land"` tags,\n'
+        '  and file paths).'
+    ) in auto_out
 
     proc_hh = run_cli(["repo", "render", "--routing", "howhard", "--agcoord", "none"], cwd=tmp_path, env=env)
     assert proc_hh.returncode == 0

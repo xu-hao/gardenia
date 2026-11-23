@@ -440,24 +440,31 @@ def render_managed_block(profile: RepoProfile) -> str:
             "  and no-direct-target-push rules still apply."
         )
 
-    if profile.agcoord == "required":
-        bullets.append(
+    if profile.agcoord in ("required", "auto"):
+        header = (
             "- Route checks and pull-request landing through the local `agcoord` broker with\n"
             "  integer byte memory claims:\n"
-            f"  - Check: `agc run {agc_flags} -- {profile.gate}`\n"
-            f"  - Land: `agc land <pr> {agc_flags} -- {profile.gate}`\n"
-            "  Never submit coordinated work recursively inside an admitted job, and never bypass or\n"
-            "  separate the gate verdict from publication."
-        )
-    elif profile.agcoord == "auto":
-        bullets.append(
-            "- On Linux hosts with `agcoord` (`agc`), route checks and pull-request landing through\n"
+            if profile.agcoord == "required"
+            else "- On Linux hosts with `agcoord` (`agc`), route checks and pull-request landing through\n"
             "  the local coordinator with integer byte memory claims:\n"
-            f"  - Check: `agc run {agc_flags} -- {profile.gate}`\n"
-            f"  - Land: `agc land <pr> {agc_flags} -- {profile.gate}`\n"
+        )
+        trailer = (
+            ""
+            if profile.agcoord == "required"
+            else (
+                " On hosts without `agc`, run\n"
+                f"  `{profile.gate}` directly and merge through the forge after checks pass."
+            )
+        )
+        bullets.append(
+            f"{header}"
+            f'  - Check: `agc run --label "<short plain-English summary>" {agc_flags} -- {profile.gate}`\n'
+            f'  - Land: `agc land <pr> --label "land #<pr> <short summary>" {agc_flags} -- {profile.gate}`\n'
+            "  Give every job a short plain-English `--label` for humans in `agc list` and `agc tui`\n"
+            '  (lead with what is checked or landed; omit commit SHAs, branch names, `"pre-land"` tags,\n'
+            "  and file paths).\n"
             "  Never submit coordinated work recursively inside an admitted job, and never bypass or\n"
-            "  separate the gate verdict from publication. On hosts without `agc`, run\n"
-            f"  `{profile.gate}` directly and merge through the forge after checks pass."
+            f"  separate the gate verdict from publication.{trailer}"
         )
     else:
         bullets.append(

@@ -1522,7 +1522,17 @@ def _execute_single_repo_upgrade(
             )
 
         if use_agc:
-            gate_cmd = ["agc", "run", *_build_agc_resource_args(profile), "--", "bash", "-lc", profile.gate]
+            gate_cmd = [
+                "agc",
+                "run",
+                "--label",
+                f"upgrade gate ({repo_name})",
+                *_build_agc_resource_args(profile),
+                "--",
+                "bash",
+                "-lc",
+                profile.gate,
+            ]
         else:
             bash_exe = shutil.which("bash", path=gate_env.get("PATH")) or shutil.which("bash") or "/bin/bash"
             gate_cmd = [bash_exe, "-lc", profile.gate]
@@ -1782,10 +1792,17 @@ def _execute_single_repo_upgrade(
             land_res = run_cmd(land_cmd, cwd=wt_dir, timeout=UPGRADE_CMD_TIMEOUT_SECONDS, env=env)
         else:
             land_method = "agc_land"
+            land_label = (
+                f"land #{pr_number} upgrade sweep ({repo_name})"
+                if pr_number is not None
+                else f"land upgrade sweep ({repo_name})"
+            )
             land_cmd = [
                 "agc",
                 "land",
                 pr_ref,
+                "--label",
+                land_label,
                 *_build_agc_resource_args(profile),
                 "--",
                 "bash",
