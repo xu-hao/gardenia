@@ -6,7 +6,7 @@
 [Read the documentation](https://gardenia.readthedocs.io/en/latest/) · [Ecosystem overview](docs/index.md) · [Full-stack architecture](docs/architecture.md)
 
 `gardenia` is the zero-dependency bootstrapper, repository initializer, verifier, and
-canonical full-stack guide for a five-tool coding-agent ecosystem: [**`agrein`**](https://github.com/xu-hao/agrein),
+canonical full-stack guide for a five-tool coding-agent ecosystem that functions as a digital artifact factory in a box: [**`agrein`**](https://github.com/xu-hao/agrein),
 [**`agroute`**](https://github.com/xu-hao/agroute) (`agr`), [**`howhard`**](https://github.com/xu-hao/howhard),
 [**`agcoord`**](https://github.com/xu-hao/agcoord) (`agc`), and **`gardenia`**.
 
