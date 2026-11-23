@@ -3,39 +3,13 @@
 <img src="docs/assets/gardenia.svg" alt="gardenia fractal mark" width="160" height="160">
 
 
-[Read the documentation](https://gardenia.readthedocs.io/en/latest/) · [Ecosystem overview](docs/index.md) · [Full-stack architecture](docs/architecture.md)
+[Read the documentation](https://gardenia.readthedocs.io/en/latest/) 
 
-`gardenia` is the zero-dependency bootstrapper, repository initializer, verifier, and
-canonical full-stack guide for a five-tool coding-agent ecosystem that functions as a digital artifact factory in a box: [**`agrein`**](https://github.com/xu-hao/agrein),
-[**`agroute`**](https://github.com/xu-hao/agroute) (`agr`), [**`howhard`**](https://github.com/xu-hao/howhard),
-[**`agcoord`**](https://github.com/xu-hao/agcoord) (`agc`), and **`gardenia`**.
-
-## Why five focused tools instead of a monolith
-
-Running coding agents across real repositories and multi-ticket queues breaks down in five
-predictable ways, each at a different system boundary:
-
-1. **Workspace and workflow chaos** — Agents edit your primary checkout directly, patch
-   symptoms without a failing reproduction test, loop in subagent-of-subagent chains, or
-   make unsettled product and live-state decisions without asking the owner → solved by
-   **`agrein`**.
-2. **Blind subscription and quota burnout** — Static model rules exhaust one client's
-   session/weekly window or dollar credit reserve while sibling clients have headroom, or
-   fail on unpriced models and cross-agent CLI handoffs → solved by **`agroute` (`agr`)**.
-3. **Guessing task difficulty** — Frontier max-effort tokens get burned on trivial edits
-   while subtle changes get under-sized, pass shallow checks, and escape into `main` as
-   silent bugs without learning from past runs → solved by **`howhard`**.
-4. **Workstation thrashing and unguarded merges** — Parallel agent test suites starve CPU,
-   RAM, and `tmpfs` on one Linux box, or pull requests tested against stale `main` merge
-   over one another → solved by **`agcoord` (`agc`)**.
-5. **Host-versus-repository setup drift** — Four CLIs, a Linux `cgroup-v2` broker,
-   user-scoped plugins across three clients, tracked `AGENTS.md` policy blocks, local
-   `.git/` stores, and multi-repo fleets drift out of sync or leak home-directory paths
-   into Git → solved by **`gardenia`**.
-
-Keeping each concern in its own tool means contributor habits stay pure Markdown, quota
-windows stay separate from difficulty estimation, OS kernel enforcement stays independent
-of LLM providers, and workstation state never leaks into repository commits.
+ * A digital artifact factory in a box.
+ * Standardized workflow that address common agentic coding pitfalls.
+ * Agent-agnostic and supports routing between different agents. Current supports `Claude Code`, `Codex`, and `Antigravity`.
+ * Automatically learn and pick the agent, model, and effort level for tasks.
+ * Manages host and remote resources for cpu / memory intensive jobs. 
 
 ## Each tool at a glance
 
