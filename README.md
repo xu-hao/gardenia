@@ -3,13 +3,13 @@
 <img src="docs/assets/gardenia.svg" alt="gardenia fractal mark" width="160" height="160">
 
 
-[Read the documentation](https://gardenia.readthedocs.io/en/latest/) 
+[Read the documentation](https://gardenia.readthedocs.io/en/latest/)
 
- * A digital artifact factory in a box.
- * Standardized workflow that address common agentic coding pitfalls.
- * Agent-agnostic and supports routing between different agents. Current supports `Claude Code`, `Codex`, and `Antigravity`.
- * Automatically learn and pick the agent, model, and effort level for tasks.
- * Manages host and remote resources for cpu / memory intensive jobs. 
+- A digital artifact factory in a box.
+- Standardized workflows that address common agentic coding pitfalls.
+- Agent-agnostic routing across coding agents — currently supports `Claude Code`, `Codex`, and `Antigravity`.
+- Automatically learns and picks the agent, model, and effort level for each task.
+- Manages local host and remote overflow resources for CPU- and memory-intensive jobs.
 
 ## Each tool at a glance
 
@@ -18,7 +18,7 @@
 | [**`agrein`**](https://github.com/xu-hao/agrein) | Contributor & coordinator workflow skills: `ticket-delivery`, `epic-queue`, `bug-investigation`, `owner-escalation` | Pure-Markdown Agent Skills per client (`codex`, `claude`, `agy`) | Runtime daemons, mutable stores, model choice, quotas, or OS limits |
 | [**`agroute`**](https://github.com/xu-hao/agroute) | Live multi-client quota/reserve filtering, offline price resolution, and launch planning: `agr usage`, `agr candidates`, `agr prices resolve`, `agr plan` | `~/.config/agroute/config.toml`, optional `agroute.toml`, `<git-common-dir>/agroute/` | Network price fetches, task difficulty estimation, semantic memory, or spawning workers |
 | [**`howhard`**](https://github.com/xu-hao/howhard) | Bayesian `(agent, model, effort)` cost/risk selection, outcome accounting, defect attribution, and learning: `howhard context`/`retrieve`/`decide` (or `pick`), `howhard observe`, `attribute-failure`, `howhard memory` | Optional `howhard.toml` and per-clone `<git-common-dir>/howhard/` beliefs, payloads, and semantic memory | Host subscription caps across clients, worker process launch, OS limits, or Git merges |
-| [**`agcoord`**](https://github.com/xu-hao/agcoord)| Shared Linux job queue, kernel `cgroup-v2` isolation, and atomic gate-plus-merge landing: `agc run`, `agc full`, `agc land` (integer byte `memory` and paired `tmpfs` + `tmpfs_inodes`) | `${XDG_STATE_HOME:-~/.local/state}/agcoord` queue/logs, `cgroup-v2` slices, atomic PR merge | Model selection, task semantics, or source-code edits |
+| [**`agcoord`**](https://github.com/xu-hao/agcoord) | Shared Linux job queue, kernel `cgroup-v2` isolation, remote overflow execution (`overflow-ssh`, `overflow-gcp-batch`, `overflow-gcp-run`), and atomic gate-plus-merge landing: `agc run`, `agc full`, `agc land` (integer byte `memory` and paired `tmpfs` + `tmpfs_inodes`) | `${XDG_STATE_HOME:-~/.local/state}/agcoord` queue/logs, local `cgroup-v2` slices & overflow pool placement, atomic PR merge | Model selection, task semantics, or source-code edits |
 | **`gardenia`** | Out-of-band provisioning, policy sync, fleet sweeps, and scope-tagged diagnostics: `gardenia host`, `gardenia repo`, `gardenia repos`, `gardenia check` | Host setup & `~/.config/gardenia/repos.toml`, `AGENTS.md` managed block + `CLAUDE.md` + `gardenia.toml`, read-only `.git/` checks | Live routing hot path, executing gates in place of `agc`, or mutating primary checkouts in fleet sweeps |
 
 Specifically, `gardenia` enforces the **host vs. repository** split across four command
@@ -57,13 +57,16 @@ groups:
    subagent call (`target_agent == host_agent`) or cross-agent CLI command
    (`target_agent != host_agent`).
 4. **Implement directly in an isolated worktree (`agrein`)** — The assigned leaf worker
-   never re-delegates recursively; it works inside a dedicated `/var/tmp` Git worktree
-   branched from `origin/main` (primary checkout stays read-only), starting bug fixes with
-   a failing behavioral test (`bug-investigation`).
-5. **Validate under `cgroup-v2` and merge atomically (`agcoord`)** — Run checks via
-   `agc run` with integer byte `memory` (and optional `tmpfs` + `tmpfs_inodes`) claims,
-   open the pull request (`Closes #N`), and gate-plus-merge atomically with `agc land <pr>`
-   (or forge merge for documentation-only changes) before cleaning up `/var/tmp`.
+   implements its assigned ticket directly (without re-delegating that same ticket;
+   multi-ticket work splits into child tickets via `epic-queue`) inside a dedicated
+   `/var/tmp` Git worktree branched from `origin/main` (primary checkout stays read-only),
+   starting bug fixes with a failing behavioral test (`bug-investigation`).
+5. **Validate under `cgroup-v2` or remote overflow and merge atomically (`agcoord`)** —
+   Run checks via `agc run` with integer byte `memory` (and optional `tmpfs` +
+   `tmpfs_inodes`) claims under local `cgroup-v2` bounds or configured remote overflow
+   pools (`--no-overflow` for local-only gates), open the pull request (`Closes #N`), and
+   gate-plus-merge atomically with `agc land <pr>` (or forge merge for documentation-only
+   changes) before cleaning up `/var/tmp`.
 6. **Record outcome & update semantic memory (`howhard`)** — Record the real outcome and
    measured usage (`howhard observe` and `howhard usage attach` following
    `matched_receipt` or `raw_native`) and distill reusable lessons into

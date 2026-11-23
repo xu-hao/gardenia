@@ -9,65 +9,67 @@ protocol enforced by a `gardenia`-managed `AGENTS.md`.
 ## Coordinator vs. Leaf Worker lifecycle
 
 The runtime protocol separates **coordinating** an epic or ticket queue from
-**implementing** a single authorized leaf ticket. Only the coordinator routes and spawns
-workers; an assigned leaf worker executes its ticket end-to-end inside a dedicated
-`/var/tmp` Git worktree without recursively invoking `agroute`, `howhard`, or subagent
-delegation, and never calls `agc` recursively from inside an already admitted `agc` job.
+**implementing** a single authorized leaf ticket. Multi-ticket work decomposes into
+separate child tickets in the coordinator (`epic-queue`), which routes and dispatches one
+worker per ready ticket; an assigned leaf worker executes its ticket end-to-end inside a
+dedicated `/var/tmp` Git worktree without re-delegating that same ticket through `agroute`
+or `howhard`, and never calls `agc` recursively from inside an already admitted `agc` job.
 
 ```text
-+-----------------------------------------------------------------------------+
-| COORDINATOR (interactive session in primary checkout or epic control plane) |
-|                                                                             |
-|  1. Triage, dependency DAG & upfront owner rulings                          |
-|     -> agrein: ticket-delivery + epic-queue + owner-escalation              |
-|                                                                             |
-|  2. Filter eligible routes within live subscription quotas & credit reserves|
-|     -> agr usage                                                            |
-|     -> agr candidates --host <codex|claude|agy> --output /tmp/TASK-c.json   |
-|        (if price_request != null: look up official prices -> agr prices     |
-|         resolve --file /tmp/TASK-p.json -> re-emit candidates once)         |
-|                                                                             |
-|  3. Choose optimal (agent, model, effort) from history & semantic memory    |
-|     -> howhard context / retrieve / decide (with independent baseline,      |
-|        or standalone pick) -> /tmp/TASK-d.json                              |
-|     -> agr plan --host <host> --decision /tmp/TASK-d.json --json            |
-|                                                                             |
-|  4. Honor needs_review, then dispatch leaf worker:                          |
-|     - target_agent == host_agent -> native subagent tool                    |
-|     - target_agent != host_agent -> returned non-interactive CLI command    |
-+--------------------------------------+--------------------------------------+
-                                       |
-                                       v
-+-----------------------------------------------------------------------------+
-| LEAF WORKER (assigned one ticket; NEVER delegates recursively)              |
-|                                                                             |
-|  1. Follow agrein: ticket-delivery (+ bug-investigation for defects)        |
-|  2. Create isolated worktree & venv under /var/tmp/<repo>-<N>-*             |
-|     (primary checkout stays strictly read-only)                             |
-|  3. Implement change + focused hermetic tests + docs + CHANGELOG.md         |
-|  4. Run coordinated validation with integer byte resource claims:           |
-|     -> agc run --no-overflow --resource cpu=4 --resource memory=4294967296  |
-|        [--resource tmpfs=<bytes> --resource tmpfs_inodes=262144]            |
-|        -- bash scripts/check                                                |
-|  5. Open PR ("Closes #N") and gate + merge atomically:                      |
-|     -> agc land <pr> --no-overflow --resource cpu=4                         |
-|        --resource memory=4294967296 [...] -- bash scripts/check             |
-|     (or verify diff & merge via forge when documentation-only exempt)       |
-|  6. Verify origin/main, issue closure, empty git cherry, clean /var/tmp     |
-|  7. Return session handoff to coordinator                                   |
-+--------------------------------------+--------------------------------------+
-                                       |
-                                       v
-+-----------------------------------------------------------------------------+
-| COORDINATOR POST-RUN ACCOUNTING                                             |
-|                                                                             |
-|  1. Record actual outcome & measured usage following plan.feedback block:   |
-|     -> howhard observe <decision_id> <clean|loud|silent|interrupted> ...    |
-|     -> howhard usage collect / attach ... (matched_receipt or raw_native)   |
-|     (later escaped bugs -> howhard attribute-failure skill)                 |
-|  2. Distill durable lessons into repository semantic memory:                |
-|     -> howhard memory learn-context / learn (or add / edit / remove)        |
-+-----------------------------------------------------------------------------+
++------------------------------------------------------------------------------------------+
+| COORDINATOR (interactive session in primary checkout or epic control plane)              |
+|                                                                                          |
+|  1. Triage, dependency DAG & upfront owner rulings                                       |
+|     -> agrein: ticket-delivery + epic-queue + owner-escalation                           |
+|                                                                                          |
+|  2. Filter eligible routes within live subscription quotas & credit reserves             |
+|     -> agr usage                                                                         |
+|     -> agr candidates --host <codex|claude|agy> --output /tmp/TASK-c.json                |
+|        (if price_request != null: look up official prices -> agr prices                  |
+|         resolve --file /tmp/TASK-p.json -> re-emit candidates once)                      |
+|                                                                                          |
+|  3. Choose optimal (agent, model, effort) from history & semantic memory                 |
+|     -> howhard context / retrieve / decide (with independent baseline,                   |
+|        or standalone pick) -> /tmp/TASK-d.json                                           |
+|     -> agr plan --host <host> --decision /tmp/TASK-d.json --json                         |
+|                                                                                          |
+|  4. Honor needs_review, then dispatch leaf worker:                                       |
+|     - target_agent == host_agent -> native subagent tool                                 |
+|     - target_agent != host_agent -> returned non-interactive CLI command                 |
++--------------------------------------------+---------------------------------------------+
+                                             |
+                                             v
++------------------------------------------------------------------------------------------+
+| LEAF WORKER (assigned one ticket; implements directly without re-delegating that ticket) |
+|                                                                                          |
+|  1. Follow agrein: ticket-delivery (+ bug-investigation for defects)                     |
+|  2. Create isolated worktree & venv under /var/tmp/<repo>-<N>-*                          |
+|     (primary checkout stays strictly read-only)                                          |
+|  3. Implement change + focused hermetic tests + docs + CHANGELOG.md                      |
+|  4. Run coordinated validation (local cgroup-v2 or remote overflow; --no-overflow        |
+|     pins repository gates to local execution when configured):                           |
+|     -> agc run --no-overflow --resource cpu=4 --resource memory=4294967296               |
+|        [--resource tmpfs=<bytes> --resource tmpfs_inodes=262144]                         |
+|        -- bash scripts/check                                                             |
+|  5. Open PR ("Closes #N") and gate + merge atomically:                                   |
+|     -> agc land <pr> --no-overflow --resource cpu=4                                      |
+|        --resource memory=4294967296 [...] -- bash scripts/check                          |
+|     (or verify diff & merge via forge when documentation-only exempt)                    |
+|  6. Verify origin/main, issue closure, empty git cherry, clean /var/tmp                  |
+|  7. Return session handoff to coordinator                                                |
++--------------------------------------------+---------------------------------------------+
+                                             |
+                                             v
++------------------------------------------------------------------------------------------+
+| COORDINATOR POST-RUN ACCOUNTING                                                          |
+|                                                                                          |
+|  1. Record actual outcome & measured usage following plan.feedback block:                |
+|     -> howhard observe <decision_id> <clean|loud|silent|interrupted> ...                 |
+|     -> howhard usage collect / attach ... (matched_receipt or raw_native)                |
+|     (later escaped bugs -> howhard attribute-failure skill)                              |
+|  2. Distill durable lessons into repository semantic memory:                             |
+|     -> howhard memory learn-context / learn (or add / edit / remove)                     |
++------------------------------------------------------------------------------------------+
 ```
 
 ## Protocol invariants across boundaries
@@ -90,13 +92,17 @@ delegation, and never calls `agc` recursively from inside an already admitted `a
    selected decision receipt (`matched_receipt`, scored directly against `decision_id`) or
    ran on a known different native cell (`raw_native`), preventing misattributed training
    signal when host controls substitute or override a model.
-4. **Integer resource claims and single landing barrier (`agcoord`)** — `agc` resource
-   claims use exact integer bytes for `memory` and `tmpfs` (with `tmpfs` paired with
-   `tmpfs_inodes`, rendered as `tmpfs_inodes=262144` by `gardenia`). `agc land <pr>` is
-   the sole repository merge barrier for code, test, config, or packaging changes; a
-   documentation-only pull request whose changed file list stays strictly within the
-   repository's `AGENTS.md` exemption skips `agc` and merges directly through the forge
-   after diff verification.
+4. **Integer resource claims, local vs. overflow execution, and single landing barrier (`agcoord`)** —
+   `agc` resource claims use exact integer bytes for `memory` and `tmpfs` (with `tmpfs`
+   paired with `tmpfs_inodes`, rendered as `tmpfs_inodes=262144` by `gardenia`). Jobs run
+   locally first under delegated `cgroup-v2` slices on managed Linux hosts and can spill
+   onto configured remote overflow pools (`agc overflow-ssh`, `agc overflow-gcp-batch`,
+   `agc overflow-gcp-run`) when `.agcoord/overflow.json` is present, while `--no-overflow`
+   pins repository gates to local execution when configured (the `gardenia` default).
+   `agc land <pr>` is the sole repository merge barrier for code, test, config, or
+   packaging changes; a documentation-only pull request whose changed file list stays
+   strictly within the repository's `AGENTS.md` exemption skips `agc` and merges directly
+   through the forge after diff verification.
 
 ## Where `gardenia` sits
 

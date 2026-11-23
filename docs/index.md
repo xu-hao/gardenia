@@ -6,14 +6,21 @@
 :align: center
 ```
 
-`gardenia` is the zero-dependency bootstrapper, repository initializer, verifier, and
-canonical full-stack guide for a five-tool coding-agent ecosystem: **`agrein`**,
-**`agroute`**, **`howhard`**, **`agcoord`**, and **`gardenia`**.
+- A digital artifact factory in a box.
+- Standardized workflows that address common agentic coding pitfalls.
+- Agent-agnostic routing across coding agents — currently supports `Claude Code`, `Codex`, and `Antigravity`.
+- Automatically learns and picks the agent, model, and effort level for each task.
+- Manages local host and remote overflow resources for CPU- and memory-intensive jobs.
 
-Together, these tools let you run a mixture of different coding agents across real repositories and multi-ticket
-epics without trashing your working tree, blowing through one subscription's rate limit,
-overpaying for simple changes, starving your Linux workstation of RAM, or leaking
-home-directory paths into Git.
+`gardenia` is the zero-dependency bootstrapper, repository initializer, verifier, and
+canonical full-stack guide for the five-tool coding-agent ecosystem behind that factory:
+**`agrein`**, **`agroute`**, **`howhard`**, **`agcoord`**, and **`gardenia`**.
+
+Together, these tools let you run a mixture of different coding agents across real
+repositories and multi-ticket epics without trashing your working tree, blowing through one
+subscription's rate limit, overpaying for simple changes, starving your Linux workstation
+of CPU or RAM (or stranding heavy jobs when remote overflow runners are configured), or
+leaking home-directory paths into Git.
 
 ## Why five focused tools instead of a monolith
 
@@ -33,11 +40,12 @@ Running autonomous coding agents on real codebases hits five distinct failure mo
    work to a shallow tier produces code that passes cursory checks and escapes into
    `main` as a silent bug, with no memory of past failures in the same codebase.
    Addressed by **`howhard`**.
-4. **Workstation thrashing and unguarded merges** — Three or four agent worktrees running
-   test suites at once on one Linux workstation fight over CPU, RAM, and scratch space
-   until jobs time out or get OOM-killed for reasons unrelated to the code, while pull
-   requests tested against an older `main` merge over each other and break the trunk.
-   Addressed by **`agcoord` (`agc`)**.
+4. **Workstation thrashing, capacity bottlenecks, and unguarded merges** — Three or four
+   agent worktrees running CPU- and memory-intensive test suites at once on one Linux
+   workstation fight over CPU, RAM, and scratch space until jobs time out or get
+   OOM-killed for reasons unrelated to the code (with no coordinated way to spill queued
+   work onto remote SSH or cloud runners), while pull requests tested against an older
+   `main` merge over each other and break the trunk. Addressed by **`agcoord` (`agc`)**.
 5. **Host-versus-repository setup drift** — Keeping Python CLIs, a Linux `cgroup-v2`
    broker, user-scoped plugins across three agent clients, per-repository `AGENTS.md`
    guardrails, local `.git/` stores, and a multi-repository fleet aligned by hand leads
@@ -46,10 +54,11 @@ Running autonomous coding agents on real codebases hits five distinct failure mo
 
 Each failure mode lives at a different system boundary: contributor workflow habits,
 multi-client subscription windows, per-repository Bayesian difficulty learning, OS kernel
-resource scheduling with atomic Git merges, and out-of-band workstation/repository
-provisioning. Splitting them into five small tools keeps every boundary explicit and lets
-you adopt, upgrade, or debug any single layer without coupling a Linux `cgroup-v2` broker
-to an LLM cost model or baking user-home paths into repository commits.
+and remote overflow resource scheduling with atomic Git merges, and out-of-band
+workstation/repository provisioning. Splitting them into five small tools keeps every
+boundary explicit and lets you adopt, upgrade, or debug any single layer without coupling a
+Linux `cgroup-v2` broker to an LLM cost model or baking user-home paths into repository
+commits.
 
 ## Each tool in plain English
 
@@ -57,8 +66,8 @@ to an LLM cost model or baking user-home paths into repository commits.
 
 - **Problem solved:** Stops agents from improvising destructive repository habits — editing
   the primary checkout, skipping issue tracking, fixing bugs without reproducing them
-  first, looping in recursive subagent chains, or making product and live-state decisions
-  without owner approval.
+  first, re-delegating the same assigned ticket instead of decomposing multi-ticket work,
+  or making product and live-state decisions without owner approval.
 - **How it works:** Ships four pure-Markdown Agent Skills installed natively into Codex,
   Claude Code, and Antigravity:
   - `ticket-delivery` — claim or file `#N — one sentence describing the work` before
@@ -68,8 +77,8 @@ to an LLM cost model or baking user-home paths into repository commits.
     clean up `/var/tmp` artifacts, and close with a concise handoff.
   - `epic-queue` — organize multi-ticket work with native GitHub sub-issues and an
     explicit dependency DAG, run parallel read-only probes upfront, batch owner rulings in
-    the foreground, and dispatch leaf workers across the ready frontier without recursive
-    re-delegation.
+    the foreground, and dispatch leaf workers across the ready frontier (each owning one
+    child ticket without re-delegating the same assigned ticket).
   - `bug-investigation` — reproduce defects before touching production code, prove whether
     a failure already exists on `origin/main`, fix root-cause producers rather than adding
     consumer fallbacks, and start every fix with a failing behavioral test.
@@ -141,25 +150,33 @@ to an LLM cost model or baking user-home paths into repository commits.
 ### `agcoord`
 
 - **Problem solved:** Prevents concurrent agent test runs from starving a shared Linux
-  machine of CPU, RAM, or `tmpfs`, and prevents pull requests from merging on stale or
-  failing test evidence.
+  machine of CPU, RAM, or `tmpfs`, spills queued or oversized jobs onto configured remote
+  overflow pools when local capacity is full, and prevents pull requests from merging on
+  stale or failing test evidence.
 - **How it works:** Runs one detached unprivileged coordinator broker per OS user that
-  queues jobs across every repository and worktree on the workstation:
+  queues jobs across every repository and worktree on the workstation and across optional
+  remote overflow pools:
   - `agc run` (and `agc full` for clean exact-head receipts) — admits validation commands
-    only when declared resources fit machine capacity, using integer byte claims for
-    memory and scratch space (for example `--resource cpu=4 --resource memory=4294967296`,
+    locally first when declared resources fit machine capacity, using integer byte claims
+    for memory and scratch space (for example `--resource cpu=4 --resource memory=4294967296`,
     plus paired `--resource tmpfs=<bytes> --resource tmpfs_inodes=262144` when scratch RAM
     disk is configured) and enforcing real kernel limits via delegated `cgroup-v2` slices
     on managed Linux hosts.
+  - Remote overflow runners (`agc overflow-ssh`, `agc overflow-gcp-batch`,
+    `agc overflow-gcp-run`) — when a repository opts in (`.agcoord/overflow.json`) and
+    overflow pools are configured on the broker, places queued or oversized jobs onto
+    remote SSH containers, Google Cloud Batch VMs, or Google Cloud Run jobs within
+    per-pool runtime and daily CPU-hour budgets, while `--no-overflow` pins local-only
+    gates to the host machine.
   - `agc land <pr>` — holds the repository's landing barrier and declared resources across
     one atomic gate-and-publish step: syncing the current target branch into the pull
     request (or refusing stale heads), running the full validation gate once on the exact
     resulting tree, and merging only when the gate exits `0` (publishing nothing on
-    `gate-failed`, `stale-main`, or `head-changed`).
-- **Exact boundary:** Owns workstation job admission, `cgroup-v2` isolation, durable run
-  logs under `${XDG_STATE_HOME:-~/.local/state}/agcoord`, and atomic pull-request
-  publication. It never picks models, reads prompt semantics, or edits application source
-  files.
+    `gate-failed`, `stale-main`, `head-changed`, or `overflow-executor-failed`).
+- **Exact boundary:** Owns workstation job admission, local `cgroup-v2` isolation, remote
+  overflow pool placement and budget accounting, durable run logs under
+  `${XDG_STATE_HOME:-~/.local/state}/agcoord`, and atomic pull-request publication. It
+  never picks models, reads prompt semantics, or edits application source files.
 
 ### `gardenia`
 
@@ -211,16 +228,21 @@ tools hand off cleanly in six steps:
    converts that decision into either a native subagent call (`target_agent == host_agent`)
    or a non-interactive cross-agent CLI command (`target_agent != host_agent`).
 4. **Implement directly in an isolated `/var/tmp` worktree (`agrein`)** — The dispatched
-   leaf worker never delegates recursively: it creates an issue-specific Git worktree and
-   virtual environment under `/var/tmp` branched from `origin/main` (keeping the primary
-   checkout read-only), starts bug fixes with a failing behavioral test
-   (`bug-investigation`), and implements the code, hermetic tests, and docs.
-5. **Run `cgroup-v2`-bounded checks and merge atomically (`agcoord`)** — On Linux, the
-   leaf worker runs validation through `agc run` with integer byte `memory` (and optional
-   `tmpfs` + `tmpfs_inodes`) claims so parallel workers never thrash the host, opens a
-   pull request (`Closes #N`), and lands it in one atomic gate-and-merge operation via
-   `agc land <pr>` (or merges directly through the forge when every changed file qualifies
-   as documentation-only), then removes its `/var/tmp` worktree and branch.
+   leaf worker implements its ticket directly without re-delegating the same assigned
+   ticket (multi-ticket epics decompose into separate child tickets via `epic-queue`): it
+   creates an issue-specific Git worktree and virtual environment under `/var/tmp`
+   branched from `origin/main` (keeping the primary checkout read-only), starts bug fixes
+   with a failing behavioral test (`bug-investigation`), and implements the code, hermetic
+   tests, and docs.
+5. **Run `cgroup-v2`- or overflow-bounded checks and merge atomically (`agcoord`)** — On
+   Linux, the leaf worker runs validation through `agc run` with integer byte `memory`
+   (and optional `tmpfs` + `tmpfs_inodes`) claims under local `cgroup-v2` limits or
+   configured remote overflow runners (`overflow-ssh`, `overflow-gcp-batch`,
+   `overflow-gcp-run`; `--no-overflow` pins local-only gates to the host) so parallel
+   workers never thrash the workstation, opens a pull request (`Closes #N`), and lands it
+   in one atomic gate-and-merge operation via `agc land <pr>` (or merges directly through
+   the forge when every changed file qualifies as documentation-only), then removes its
+   `/var/tmp` worktree and branch.
 6. **Record outcome, usage, and semantic memory (`howhard`)** — After the worker returns
    its handoff, the coordinator records the real outcome and measured token/time usage in
    `howhard` (`howhard observe` and `howhard usage attach`, following the plan's
