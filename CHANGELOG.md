@@ -4,9 +4,16 @@ All notable changes to `gardenia` are documented in this file.
 
 ## Unreleased
 
+## 0.2.2 — 2026-11-23
+
 - Pass explicit human-readable `--label` flags in rendered `AGENTS.md` `agc run` /
   `agc land` blocks (with queue-display guidance for `agc list` and `agc tui`) and in
   `gardenia repos upgrade` invocations (`#23`).
+- Streamlined `README.md` and the Read the Docs overview (`docs/index.md`,
+  `docs/architecture.md`, `docs/quickstart.md`) around the *digital artifact factory in a
+  box* framing, separating human-facing setup, fleet commands, and live terminal UIs
+  (`gardenia`, `agr tui`, `agc tui`) from agent-operated workflow, routing, sizing, and
+  merge-queue tools (`agrein`, `agroute`, `howhard`, `agcoord`) (`#19`, `#21`, `#25`).
 
 ## 0.2.1 — 2026-11-22
 
