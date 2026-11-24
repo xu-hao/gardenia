@@ -142,10 +142,11 @@ commits.
   repository over time.
 - **How it works:** Combines an independent LLM task reading with a per-repository
   Bayesian capability model and writable semantic memory:
-  - `howhard context`, `howhard retrieve`, and `howhard decide` (using an independent
-    stateless baseline forecast in a fresh context, or standalone `howhard pick`) — narrow
-    the candidate inventory to a task-specific capability-fit band and forecast `clean`,
-    caught (`loud`), and escaped (`silent`) outcomes, token usage, and wall-clock time.
+  - `howhard context --auto-decide`, `howhard context` / `howhard retrieve` /
+    `howhard decide` (evaluating `baseline_request` in an independent stateless context
+    only when non-null), or standalone `howhard pick` — narrow the candidate inventory to a
+    task-specific capability-fit band and forecast `clean`, caught (`loud`), and escaped
+    (`silent`) outcomes, token usage, and wall-clock time.
   - `howhard observe` (plus `howhard usage collect` / `howhard usage attach` when host
     usage artifacts are available) — records actual `clean`, `loud`, `silent`, or
     `interrupted` outcomes and measured usage against the decision receipt or raw native
@@ -239,9 +240,10 @@ tools hand off cleanly in six steps:
    resolving any unpriced newly discovered models once offline via `agr prices resolve` if
    `price_request` is non-null.
 3. **Choose `(agent, model, effort)` and resolve the launch plan (`howhard` → `agr plan`)** —
-   `howhard` (`context` / `retrieve` / `decide` with an independent stateless baseline
-   forecast, or `pick`) weighs task difficulty and repository semantic memory against
-   expected cost to pick one route, and `agr plan --host <codex|claude|agy> --decision /tmp/TASK-decision.json --json`
+   `howhard` (`context --auto-decide`, or `context` / `retrieve` / `decide` evaluating
+   `baseline_request` in an independent stateless context only when non-null, or `pick`)
+   weighs task difficulty and repository semantic memory against expected cost to pick one
+   route, and `agr plan --host <codex|claude|agy> --decision /tmp/TASK-decision.json --json`
    converts that decision into either a native subagent call (`target_agent == host_agent`)
    or a non-interactive cross-agent CLI command (`target_agent != host_agent`).
 4. **Implement directly in an isolated `/var/tmp` worktree (`agrein`)** — The dispatched

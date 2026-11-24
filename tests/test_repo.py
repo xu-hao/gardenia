@@ -47,6 +47,12 @@ def test_repo_render_outside_git_and_routing_modes(tmp_path: Path) -> None:
     assert out.strip().endswith(MANAGED_END)
     assert "agr candidates --host <codex|claude|agy>" in out
     assert (
+        "  3. Select a route with `howhard` (`context --auto-decide`, or `context`/`retrieve`/`decide`\n"
+        "     evaluating `baseline_request` in an independent stateless context only when non-null, or\n"
+        "     `pick`), then resolve the execution plan with\n"
+        "     `agr plan --host <codex|claude|agy> --decision /tmp/TASK-decision.json --json`."
+    ) in out
+    assert (
         '  - Check: `agc run --label "<short plain-English summary>" '
         '--resource cpu=2 --resource memory=2147483648 --resource tmpfs=1073741824 --resource tmpfs_inodes=262144 -- pytest -q`'
     ) in out
@@ -82,7 +88,14 @@ def test_repo_render_outside_git_and_routing_modes(tmp_path: Path) -> None:
     proc_hh = run_cli(["repo", "render", "--routing", "howhard", "--agcoord", "none"], cwd=tmp_path, env=env)
     assert proc_hh.returncode == 0
     assert "agr candidates" not in proc_hh.stdout
-    assert "howhard" in proc_hh.stdout
+    assert (
+        "- Coordinate ticket work by delegating each authorized ticket to a native worker\n"
+        "  selected with the installed `howhard` skill (`context --auto-decide`, or\n"
+        "  `context`/`retrieve`/`decide` evaluating `baseline_request` in an independent stateless\n"
+        "  context only when non-null, or `pick`), then record the actual outcome and measured\n"
+        "  usage in `howhard` (`observe`, `usage attach`) and update `howhard` memory; an assigned\n"
+        "  leaf worker implements its ticket directly without recursively delegating it."
+    ) in proc_hh.stdout
     assert "agc run" not in proc_hh.stdout
 
 

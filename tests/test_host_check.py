@@ -35,6 +35,9 @@ def test_host_check_clean_enforced_linux_host(tmp_path: Path) -> None:
     assert data["format"] == "gardenia-check-v1"
     assert data["ok"] is True
     assert data["findings"] == []
+    assert data["host"]["clis"]["howhard"]["min_version"] == "5.0.0"
+    assert data["host"]["clis"]["howhard"]["version"] == "5.0.0"
+    assert data["host"]["clis"]["howhard"]["status"] == "ok"
     assert data["host"]["broker"]["mode"] == "cgroup-v2"
     assert data["host"]["broker"]["enforced"] is True
     assert data["host"]["agroute_config"]["valid"] is True
@@ -63,14 +66,14 @@ def test_host_check_never_invokes_codex_plugin_list_and_picks_highest_semver(tmp
     hh_cache.rmdir()
     tmp_manifest = home / ".codex" / ".tmp" / "marketplaces" / "howhard" / "plugin.json"
     tmp_manifest.parent.mkdir(parents=True, exist_ok=True)
-    tmp_manifest.write_text(json.dumps({"name": "howhard", "version": "4.0.0"}), encoding="utf-8")
+    tmp_manifest.write_text(json.dumps({"name": "howhard", "version": "5.0.0"}), encoding="utf-8")
 
     proc = run_cli(["host", "check", "--clients", "codex", "--strict", "--json"], cwd=tmp_path, env=env)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     data = json.loads(proc.stdout)
     codex_plugins = data["host"]["clients"]["codex"]["plugins"]
     assert codex_plugins["agroute"]["version"] == "0.10.0"
-    assert codex_plugins["howhard"]["version"] == "4.0.0"
+    assert codex_plugins["howhard"]["version"] == "5.0.0"
 
     # Verify codex binary was never invoked at all during host check.
     if log_file.exists():
@@ -83,19 +86,19 @@ def test_host_check_detects_cli_vs_plugin_version_drift_and_strict_mode(tmp_path
     install_healthy_host_shims(
         bin_dir,
         home,
-        howhard_ver="4.0.0",
+        howhard_ver="5.0.0",
         agr_ver="0.6.0",
         agc_ver="0.10.1",
         agy_plugins=[
             {"name": "agrein", "enabled": True, "version": "0.1.0"},
             {"name": "agcoord", "enabled": True, "version": "0.9.1"},
-            {"name": "howhard", "enabled": True, "version": "4.0.0"},
+            {"name": "howhard", "enabled": True, "version": "5.0.0"},
             {"name": "agroute", "enabled": True, "version": "0.6.0"},
         ],
         codex_versions={
             "agrein": "0.1.0",
             "agcoord": "0.10.1",
-            "howhard": "4.0.0",
+            "howhard": "5.0.0",
             "agroute": "0.5.2",
         },
     )
@@ -118,13 +121,13 @@ def test_host_check_detects_cli_vs_plugin_version_drift_and_strict_mode(tmp_path
 
 def test_host_check_reports_missing_and_outdated_clis_and_invalid_agroute_config(tmp_path: Path) -> None:
     env, home, bin_dir = make_isolated_env(tmp_path)
-    # Only install outdated howhard; omit agr and agc.
+    # Only install outdated howhard (4.0.0 < 5.0.0); omit agr and agc.
     make_python_shim(
         bin_dir,
         "howhard",
         """
         import sys
-        print("howhard 3.9.0")
+        print("howhard 4.0.0")
         """,
     )
     bad_cfg = home / ".config" / "agroute" / "config.toml"
@@ -135,7 +138,13 @@ def test_host_check_reports_missing_and_outdated_clis_and_invalid_agroute_config
     assert proc.returncode == 1
     data = json.loads(proc.stdout)
     assert data["ok"] is False
+    assert data["host"]["clis"]["howhard"]["min_version"] == "5.0.0"
+    assert data["host"]["clis"]["howhard"]["version"] == "4.0.0"
     assert data["host"]["clis"]["howhard"]["status"] == "outdated"
+    assert any(
+        f["component"] == "howhard" and "version 4.0.0 is below minimum 5.0.0" in f["message"]
+        for f in data["findings"]
+    )
     assert data["host"]["clis"]["agroute"]["status"] == "missing"
     assert data["host"]["clis"]["agcoord"]["status"] == "missing"
     assert data["host"]["agroute_config"]["valid"] is False

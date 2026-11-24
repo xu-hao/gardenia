@@ -64,7 +64,7 @@ def install_healthy_host_shims(
     bin_dir: Path,
     home: Path,
     *,
-    howhard_ver: str = "4.0.0",
+    howhard_ver: str = "5.0.0",
     agr_ver: str = "0.6.0",
     agc_ver: str = "0.10.1",
     broker_mode: str = "cgroup-v2",

@@ -32,7 +32,7 @@ def test_unified_check_tags_host_and_repo_scopes_explicitly(tmp_path: Path) -> N
         agy_plugins=[
             {"name": "agrein", "enabled": True, "version": "0.1.0"},
             {"name": "agcoord", "enabled": True, "version": "0.9.1"},  # drift warning
-            {"name": "howhard", "enabled": True, "version": "4.0.0"},
+            {"name": "howhard", "enabled": True, "version": "5.0.0"},
             {"name": "agroute", "enabled": True, "version": "0.6.0"},
         ],
     )

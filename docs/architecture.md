@@ -29,8 +29,8 @@ or `howhard`, and never calls `agc` recursively from inside an already admitted 
 |         resolve --file /tmp/TASK-p.json -> re-emit candidates once)                      |
 |                                                                                          |
 |  3. Choose optimal (agent, model, effort) from history & semantic memory                 |
-|     -> howhard context / retrieve / decide (with independent baseline,                   |
-|        or standalone pick) -> /tmp/TASK-d.json                                           |
+|     -> howhard context --auto-decide (or context/retrieve/decide evaluating              |
+|        baseline_request statelessly only when non-null, or pick) -> /tmp/TASK-d.json     |
 |     -> agr plan --host <host> --decision /tmp/TASK-d.json --json                         |
 |                                                                                          |
 |  4. Honor needs_review, then dispatch leaf worker:                                       |
@@ -81,13 +81,15 @@ or `howhard`, and never calls `agc` recursively from inside an already admitted 
    first-party pricing (or classifies an internal harness identifier as `"alias"` or
    `"unlisted"`), persists it locally via `agr prices resolve`, and re-emits candidates
    once so `howhard` compares fully priced inventories whenever prices exist.
-2. **Stateless baseline independence (`howhard`)** — During `context` / `retrieve` /
-   `decide`, the initial task capability forecast runs in a fresh, independent context so
-   prior debate or sunk-cost bias in the coordinator thread does not skew difficulty
-   estimates. Both `agroute` (`<git-common-dir>/agroute/`) and `howhard`
-   (`<git-common-dir>/howhard/`) store repository-local state under `--git-common-dir`, so
-   observations and memories are shared automatically across linked worktrees of the same
-   clone without being tracked in Git.
+2. **Stateless baseline independence (`howhard`)** — Routes are selected via
+   `context --auto-decide`, `context` / `retrieve` / `decide`, or `pick`. Whenever
+   `baseline_request` is non-null during `context` / `retrieve` / `decide`, the baseline
+   capability forecast runs in a fresh, independent stateless context so prior debate or
+   sunk-cost bias in the coordinator thread does not skew difficulty estimates. Both
+   `agroute` (`<git-common-dir>/agroute/`) and `howhard` (`<git-common-dir>/howhard/`)
+   store repository-local state under `--git-common-dir`, so observations and memories are
+   shared automatically across linked worktrees of the same clone without being tracked in
+   Git.
 3. **Receipt matching vs. raw native feedback (`agr plan` → `howhard observe`)** — `agr
    plan` emits a `feedback` block specifying whether the executed worker matches the
    selected decision receipt (`matched_receipt`, scored directly against `decision_id`) or
@@ -111,7 +113,7 @@ or `howhard`, and never calls `agc` recursively from inside an already admitted 
 synchronizes, and audits the environment around that loop:
 
 - **Workstation (`gardenia host`)** — `gardenia host setup` and `gardenia host check`
-  ensure `howhard` (`>= 4.0.0`), `agr` (`>= 0.6.0`), `agc` (`>= 0.10.0` on Linux), the
+  ensure `howhard` (`>= 5.0.0`), `agr` (`>= 0.6.0`), `agc` (`>= 0.10.0` on Linux), the
   Linux `agc` broker (preserving active `cgroup-v2` enforcement), user-scoped client
   plugins (`codex`, `claude`, `agy`), and `~/.config/agroute/config.toml` reserves are
   installed and version-aligned.
