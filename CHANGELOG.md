@@ -4,6 +4,16 @@ All notable changes to `gardenia` are documented in this file.
 
 ## Unreleased
 
+## 0.2.3 — 2026-11-24
+
+- Raised the minimum required `howhard` host CLI version in `gardenia host check` from
+  `4.0.0` to `5.0.0` (`#29`).
+- Updated the rendered `AGENTS.md` routing block (`gardenia repo init` /
+  `gardenia repo render` for both `routing = "agroute"` and `routing = "howhard"`) and
+  canonical documentation for `howhard 5.0.0` (`context --auto-decide`, evaluating
+  `baseline_request` in an independent stateless context only when non-null during
+  `context`/`retrieve`/`decide`, or `pick`) (`#29`).
+
 ## 0.2.2 — 2026-11-23
 
 - Pass explicit human-readable `--label` flags in rendered `AGENTS.md` `agc run` /

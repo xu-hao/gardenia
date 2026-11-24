@@ -390,8 +390,9 @@ def render_managed_block(profile: RepoProfile) -> str:
             "     If `price_request` is non-null, look up official first-party provider pricing (or\n"
             "     classify internal harness models as `\"alias\"` or `\"unlisted\"`), run\n"
             "     `agr prices resolve --file /tmp/TASK-prices.json --json`, and re-emit candidates once.\n"
-            "  3. Select a route with `howhard` (`context`/`retrieve`/`decide` with an independent\n"
-            "     stateless baseline forecast, or `pick`), then resolve the execution plan with\n"
+            "  3. Select a route with `howhard` (`context --auto-decide`, or `context`/`retrieve`/`decide`\n"
+            "     evaluating `baseline_request` in an independent stateless context only when non-null, or\n"
+            "     `pick`), then resolve the execution plan with\n"
             "     `agr plan --host <codex|claude|agy> --decision /tmp/TASK-decision.json --json`.\n"
             "  4. Honor `needs_review`. Execute native plans (`target_agent == host_agent`) with the\n"
             "     host's native subagent tool and cross-agent plans (`target_agent != host_agent`) with\n"
@@ -402,11 +403,11 @@ def render_managed_block(profile: RepoProfile) -> str:
     elif profile.routing == "howhard":
         bullets.append(
             "- Coordinate ticket work by delegating each authorized ticket to a native worker\n"
-            "  selected with the installed `howhard` skill (`context`/`retrieve`/`decide` with an\n"
-            "  independent stateless baseline forecast, or `pick`), then record the actual outcome\n"
-            "  and measured usage in `howhard` (`observe`, `usage attach`) and update `howhard`\n"
-            "  memory; an assigned leaf worker implements its ticket directly without recursively\n"
-            "  delegating it."
+            "  selected with the installed `howhard` skill (`context --auto-decide`, or\n"
+            "  `context`/`retrieve`/`decide` evaluating `baseline_request` in an independent stateless\n"
+            "  context only when non-null, or `pick`), then record the actual outcome and measured\n"
+            "  usage in `howhard` (`observe`, `usage attach`) and update `howhard` memory; an assigned\n"
+            "  leaf worker implements its ticket directly without recursively delegating it."
         )
     else:
         bullets.append(

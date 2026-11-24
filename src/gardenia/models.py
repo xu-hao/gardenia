@@ -41,7 +41,7 @@ class CliSpec:
 
 
 CLI_SPECS: tuple[CliSpec, ...] = (
-    CliSpec(package="howhard", binary="howhard", min_version="4.0.0", linux_only=False),
+    CliSpec(package="howhard", binary="howhard", min_version="5.0.0", linux_only=False),
     CliSpec(package="agroute", binary="agr", min_version="0.6.0", linux_only=False),
     CliSpec(package="agcoord", binary="agc", min_version="0.10.0", linux_only=True),
 )

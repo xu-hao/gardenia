@@ -17,7 +17,7 @@
 gardenia --version
 ```
 
-Prints `gardenia 0.2.2` and exits `0`.
+Prints `gardenia 0.2.3` and exits `0`.
 
 ## `gardenia host check`
 
@@ -37,7 +37,7 @@ gardenia host check [--clients codex,claude,agy] [--with-agcoord] [--strict] [--
 
 Checks performed:
 
-1. Host CLIs on `PATH`: `howhard` (`>= 4.0.0`), `agr` (`>= 0.6.0`), and on Linux `agc`
+1. Host CLIs on `PATH`: `howhard` (`>= 5.0.0`), `agr` (`>= 0.6.0`), and on Linux `agc`
    (`>= 0.10.0`).
 2. Linux `agcoord` broker status via `agc --json list --limit 1` (`30s` timeout),
    classifying `resource_bindings` into `cgroup-v2` (enforced) vs. `admission-only`
@@ -297,7 +297,7 @@ via a sibling temporary file plus `os.replace`. Malformed TOML, unknown keys, wr
 ```json
 {
   "format": "gardenia-check-v1",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "ok": true,
   "strict": false,
   "host": {
@@ -305,7 +305,7 @@ via a sibling temporary file plus `os.replace`. Malformed TOML, unknown keys, wr
     "home": "/home/user",
     "detected_clients": ["codex", "claude", "agy"],
     "clis": {
-      "howhard": {"package": "howhard", "binary": "howhard", "min_version": "4.0.0", "installed": true, "path": "/home/user/.local/bin/howhard", "version": "4.0.0", "status": "ok", "reason": null}
+      "howhard": {"package": "howhard", "binary": "howhard", "min_version": "5.0.0", "installed": true, "path": "/home/user/.local/bin/howhard", "version": "5.0.0", "status": "ok", "reason": null}
     },
     "broker": {
       "status": "ok",
