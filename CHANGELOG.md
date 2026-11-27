@@ -4,6 +4,15 @@ All notable changes to `gardenia` are documented in this file.
 
 ## Unreleased
 
+## 0.2.4 — 2026-11-27
+
+- Raised the minimum required host CLI versions in `gardenia host check`: `howhard` from
+  `5.0.0` to `6.0.0`, and `agroute` (`agr`) from `0.6.0` to `0.7.0` (`#31`).
+- Updated the rendered `AGENTS.md` routing block (`gardenia repo init` /
+  `gardenia repo render` for both `routing = "agroute"` and `routing = "howhard"`) and
+  canonical documentation for `howhard 6.0.0`, passing `--host <codex|claude|agy>` on
+  `howhard context --auto-decide` and `howhard pick` (`#31`).
+
 ## 0.2.3 — 2026-11-24
 
 - Raised the minimum required `howhard` host CLI version in `gardenia host check` from

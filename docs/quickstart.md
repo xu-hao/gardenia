@@ -18,7 +18,7 @@ uv tool install gardenia
 gardenia --version
 ```
 
-Expect `gardenia 0.2.3`.
+Expect `gardenia 0.2.4`.
 
 ## Step 1 — Once per workstation (`gardenia host`)
 
@@ -46,7 +46,7 @@ gardenia host setup \
 
 What `gardenia host setup` does:
 
-1. Installs `howhard` (`>= 5.0.0`), `agroute` (`>= 0.6.0`), and (on Linux) `agcoord`
+1. Installs `howhard` (`>= 6.0.0`), `agroute` (`>= 0.7.0`), and (on Linux) `agcoord`
    (`>= 0.10.0`) via `uv tool install` (or `pipx install` fallback). Pass `--upgrade` to
    upgrade already-installed tools.
 2. Configures the Linux `agcoord` broker safely:

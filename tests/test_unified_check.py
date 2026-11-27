@@ -32,8 +32,8 @@ def test_unified_check_tags_host_and_repo_scopes_explicitly(tmp_path: Path) -> N
         agy_plugins=[
             {"name": "agrein", "enabled": True, "version": "0.1.0"},
             {"name": "agcoord", "enabled": True, "version": "0.9.1"},  # drift warning
-            {"name": "howhard", "enabled": True, "version": "5.0.0"},
-            {"name": "agroute", "enabled": True, "version": "0.6.0"},
+            {"name": "howhard", "enabled": True, "version": "6.0.0"},
+            {"name": "agroute", "enabled": True, "version": "0.7.0"},
         ],
     )
     repo = init_git_repo(tmp_path / "repo", env)  # missing AGENTS.md -> repo error
