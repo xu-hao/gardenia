@@ -47,10 +47,12 @@ def test_repo_render_outside_git_and_routing_modes(tmp_path: Path) -> None:
     assert out.strip().endswith(MANAGED_END)
     assert "agr candidates --host <codex|claude|agy>" in out
     assert (
-        "  3. Select a route with `howhard` (`context --auto-decide`, or `context`/`retrieve`/`decide`\n"
-        "     evaluating `baseline_request` in an independent stateless context only when non-null, or\n"
-        "     `pick`), then resolve the execution plan with\n"
-        "     `agr plan --host <codex|claude|agy> --decision /tmp/TASK-decision.json --json`."
+        "  3. Select a route with `howhard` (`context --host <codex|claude|agy> --auto-decide`, or\n"
+        "     `context`/`retrieve`/`decide` evaluating `baseline_request` in an independent stateless\n"
+        "     context only when non-null, or `pick --host <codex|claude|agy>`), then resolve the\n"
+        "     execution plan with\n"
+        "     `agr plan --host <codex|claude|agy> --decision /tmp/TASK-decision.json --json`.\n"
+        "  4. Honor `needs_review`."
     ) in out
     assert (
         '  - Check: `agc run --label "<short plain-English summary>" '
@@ -90,11 +92,13 @@ def test_repo_render_outside_git_and_routing_modes(tmp_path: Path) -> None:
     assert "agr candidates" not in proc_hh.stdout
     assert (
         "- Coordinate ticket work by delegating each authorized ticket to a native worker\n"
-        "  selected with the installed `howhard` skill (`context --auto-decide`, or\n"
-        "  `context`/`retrieve`/`decide` evaluating `baseline_request` in an independent stateless\n"
-        "  context only when non-null, or `pick`), then record the actual outcome and measured\n"
-        "  usage in `howhard` (`observe`, `usage attach`) and update `howhard` memory; an assigned\n"
-        "  leaf worker implements its ticket directly without recursively delegating it."
+        "  selected with the installed `howhard` skill (`context --host <codex|claude|agy> --auto-decide`,\n"
+        "  or `context`/`retrieve`/`decide` evaluating `baseline_request` in an independent stateless\n"
+        "  context only when non-null, or `pick --host <codex|claude|agy>`), then record the actual\n"
+        "  outcome and measured usage in `howhard` (`observe`, `usage attach`) and update `howhard`\n"
+        "  memory; an assigned leaf worker implements its ticket directly without recursively\n"
+        "  delegating it.\n"
+        "- Track every code, test, documentation, or packaging change"
     ) in proc_hh.stdout
     assert "agc run" not in proc_hh.stdout
 
