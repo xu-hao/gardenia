@@ -4,6 +4,52 @@ All notable changes to `gardenia` are documented in this file.
 
 ## Unreleased
 
+- Added user-configured CLI tools and agent plugins, including private ones, through a host
+  file at `${XDG_CONFIG_HOME:-~/.config}/gardenia/config.toml` (or
+  `$GARDENIA_HOST_CONFIG`). `[[tools]]` and `[[plugins]]` entries merge over the built-in
+  `agrein`, `agroute`, `howhard`, and `agcoord` stack, and `gardenia host setup` /
+  `gardenia host check` manage and audit them across `codex`, `claude`, and `agy`
+  (`#36`).
+- Added a `tools` list to the repository profile (and a repeatable `--tool` flag).
+  `gardenia repo init` and `gardenia repos upgrade` stamp one
+  `<!-- <tool>:begin --> ... <!-- <tool>:end -->` block per tool from the installed
+  plugin's `AGENTS.snippet.md`. `gardenia repo check` verifies marker presence and
+  integrity from repository files alone, while `gardenia check` and
+  `gardenia repos check` also verify host installation and block content (`#36`).
+- Added `gardenia repo init --stealth`, an untracked profile under
+  `<git-common-dir>/gardenia/` for external or shared repositories that must not receive
+  committed `gardenia` files or markers (`#36`).
+- `gardenia repos upgrade --package <name>` no longer passes a declared or
+  user-configured tool name to `uv`, `pip`, or `cargo` unless the repository depends on
+  that package, so a private tool name cannot resolve to an unrelated public package
+  (`#36`).
+
+Example: a private merge-gate toolkit named `hotgate`. In the host `config.toml`:
+
+```toml
+[[tools]]
+name = "hotgate"
+install_target = "git+ssh://git@github.com/<owner>/hotgate.git"
+binary = "hotgate"
+min_version = "0.1.0"
+linux_only = false
+
+[[plugins]]
+name = "hotgate"
+source = "git@github.com:<owner>/hotgate.git"
+clients = ["codex", "claude", "agy"]
+cli = "hotgate"
+```
+
+Then opt a repository in through `gardenia.toml` and run `gardenia repo init`:
+
+```toml
+gate = "bash scripts/check"
+cpu = 2
+memory_gb = 4
+tools = ["hotgate"]
+```
+
 ## 0.2.5 — 2026-11-28
 
 - Fixed `gardenia repos upgrade --no-upgrade-locks` skipping test-virtualenv provisioning

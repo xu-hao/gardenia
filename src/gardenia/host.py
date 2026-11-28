@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import tomllib
@@ -12,17 +14,19 @@ from typing import Any, Mapping
 
 from gardenia import __version__
 from gardenia.models import (
+    BUILTIN_PLUGINS,
+    BUILTIN_TOOLS,
     CHECK_FORMAT,
-    CLI_SPECS,
-    CLI_WITH_PLUGINS,
     DEFAULT_TIMEOUT_SECONDS,
-    GITHUB_OWNER,
-    PLUGIN_PACKAGES,
+    ENTRY_NAME_RE,
+    PLUGIN_SNIPPET_FILENAME,
+    RESERVED_ENTRY_NAMES,
     SUPPORTED_CLIENTS,
     CliSpec,
     Finding,
     GardeniaError,
     PlannedAction,
+    PluginSpec,
     compute_ok,
     extract_version,
     is_finite_number,
@@ -30,9 +34,22 @@ from gardenia.models import (
     run_cmd,
     version_lt,
 )
+from gardenia.repo import extract_sibling_block, normalize_snippet, render_sibling_block
 
 SETUP_COMMAND_TIMEOUT_SECONDS = 300.0
 BROKER_PROBE_TIMEOUT_SECONDS = 30.0
+
+HOST_CONFIG_KEYS = frozenset({"tools", "plugins"})
+HOST_TOOL_KEYS = frozenset({"name", "install_target", "package", "binary", "min_version", "linux_only"})
+HOST_PLUGIN_KEYS = frozenset({"name", "source", "clients", "cli"})
+
+_LOCAL_PREFIXES = ("/", "./", "../", "~/")
+_GIT_URL_PREFIXES = ("git+ssh://", "git+https://", "ssh://", "https://")
+_SCP_SOURCE_RE = re.compile(r"^(?P<user>[A-Za-z0-9._-]+)@(?P<host>[A-Za-z0-9.-]+):(?P<path>[^/].*)$")
+_GITHUB_SOURCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$")
+_PACKAGE_TARGET_RE = re.compile(
+    r"^(?P<dist>[A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9._,-]+\])?(?:(?:[<>]=?|[=!~]=)[A-Za-z0-9.*+!,<>=~-]+)?$"
+)
 
 
 def _effective_env(env: Mapping[str, str] | None) -> dict[str, str]:
@@ -54,6 +71,267 @@ def _effective_agroute_config_path(env: Mapping[str, str]) -> Path:
     if xdg:
         return Path(xdg) / "agroute" / "config.toml"
     return _effective_home(env) / ".config" / "agroute" / "config.toml"
+
+
+@dataclass(frozen=True)
+class HostConfig:
+    """Built-in managed stack merged with the user's host ``config.toml``."""
+
+    path: Path
+    exists: bool
+    tools: tuple[CliSpec, ...] = BUILTIN_TOOLS
+    plugins: tuple[PluginSpec, ...] = BUILTIN_PLUGINS
+    user_tools: tuple[str, ...] = ()
+    user_plugins: tuple[str, ...] = ()
+
+    def tool(self, name: str | None) -> CliSpec | None:
+        return next((spec for spec in self.tools if spec.name == name), None)
+
+    def plugin(self, name: str) -> PluginSpec | None:
+        return next((spec for spec in self.plugins if spec.name == name), None)
+
+    def plugins_for(self, client: str) -> tuple[PluginSpec, ...]:
+        return tuple(spec for spec in self.plugins if client in spec.clients)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": str(self.path),
+            "exists": self.exists,
+            "user_tools": list(self.user_tools),
+            "user_plugins": list(self.user_plugins),
+        }
+
+
+def _expand_user(raw: str, env: Mapping[str, str]) -> Path:
+    """Expand a leading ``~`` against the effective ``HOME`` (never the ambient one)."""
+
+    if raw == "~" or raw.startswith("~/"):
+        return _effective_home(env) / raw[2:]
+    return Path(raw)
+
+
+def effective_host_config_path(env: Mapping[str, str] | None = None) -> Path:
+    """Resolve the host tool and plugin configuration path."""
+
+    effective_env = _effective_env(env)
+    override = effective_env.get("GARDENIA_HOST_CONFIG", "").strip()
+    if override:
+        return _expand_user(override, effective_env)
+    xdg = effective_env.get("XDG_CONFIG_HOME", "").strip()
+    if xdg:
+        return _expand_user(xdg, effective_env) / "gardenia" / "config.toml"
+    return _effective_home(effective_env) / ".config" / "gardenia" / "config.toml"
+
+
+def _classify_source(value: str) -> str | None:
+    """Classify an install source as ``local``, ``git``, ``scp``, ``github``, or ``package``."""
+
+    if value.startswith("-") or any(ord(char) < 32 for char in value):
+        return None
+    if value in (".", "..", "~") or value.startswith(_LOCAL_PREFIXES):
+        return "local"
+    if any(char.isspace() for char in value):
+        return None
+    if value.startswith(_GIT_URL_PREFIXES):
+        return "git"
+    if _SCP_SOURCE_RE.match(value):
+        return "scp"
+    if _GITHUB_SOURCE_RE.match(value):
+        return "github"
+    if _PACKAGE_TARGET_RE.match(value):
+        return "package"
+    return None
+
+
+def _resolve_local_source(value: str, *, config_dir: Path, env: Mapping[str, str]) -> str:
+    path = _expand_user(value, env)
+    if not path.is_absolute():
+        path = config_dir / path
+    return os.path.normpath(os.path.abspath(path))
+
+
+def _tool_install_target(value: str, kind: str, *, config_dir: Path, env: Mapping[str, str]) -> str:
+    """Normalize a configured tool source into a ``uv`` / ``pipx`` install argument."""
+
+    if kind == "local":
+        return _resolve_local_source(value, config_dir=config_dir, env=env)
+    if kind == "github":
+        return f"git+https://github.com/{value.removesuffix('.git')}.git"
+    if kind == "scp":
+        match = _SCP_SOURCE_RE.match(value)
+        assert match is not None
+        return f"git+ssh://{match['user']}@{match['host']}/{match['path']}"
+    if kind == "git" and (value.startswith("ssh://") or (value.startswith("https://") and value.endswith(".git"))):
+        return f"git+{value}"
+    return value
+
+
+def _config_error(path: Path, message: str) -> GardeniaError:
+    return GardeniaError(f"Invalid host gardenia configuration ({path}): {message}", exit_code=2)
+
+
+def _config_entries(data: Mapping[str, Any], key: str, allowed: frozenset[str], path: Path) -> list[dict[str, Any]]:
+    raw = data.get(key, [])
+    if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
+        raise _config_error(path, f"'{key}' must be an array of tables ([[{key}]]).")
+    seen: set[str] = set()
+    for item in raw:
+        name = item.get("name")
+        if not isinstance(name, str) or not ENTRY_NAME_RE.fullmatch(name) or name in RESERVED_ENTRY_NAMES:
+            raise _config_error(
+                path,
+                f"every [[{key}]] entry needs a 'name' of letters, digits, '.', '_', or '-' "
+                f"(not 'gardenia'); got {name!r}.",
+            )
+        unknown = sorted(set(item) - allowed)
+        if unknown:
+            raise _config_error(
+                path,
+                f"unknown key(s) in [[{key}]] '{name}': {', '.join(unknown)}. "
+                f"Allowed keys: {', '.join(sorted(allowed))}.",
+            )
+        if name in seen:
+            raise _config_error(path, f"duplicate [[{key}]] entry '{name}'.")
+        seen.add(name)
+    return raw
+
+
+def _config_string(item: Mapping[str, Any], key: str, path: Path) -> str:
+    value = item[key]
+    if not isinstance(value, str) or not value.strip() or value.startswith("-"):
+        raise _config_error(path, f"'{key}' for '{item['name']}' must be a non-empty string not starting with '-'.")
+    return value.strip()
+
+
+def _parse_tool_entry(
+    item: Mapping[str, Any],
+    base: CliSpec | None,
+    *,
+    path: Path,
+    env: Mapping[str, str],
+) -> CliSpec:
+    name = item["name"]
+    spec = base or CliSpec(name=name, binary=name, min_version="0.0.0")
+    changes: dict[str, Any] = {}
+    if "install_target" in item and "package" in item:
+        raise _config_error(path, f"set only one of 'install_target' or 'package' for tool '{name}'.")
+    for key in ("install_target", "package"):
+        if key in item:
+            value = _config_string(item, key, path)
+            kind = _classify_source(value)
+            if kind is None:
+                raise _config_error(
+                    path,
+                    f"'{key}' for tool '{name}' must be a PyPI name, git+ssh:// or git+https:// URL, "
+                    "GitHub owner/repo, or a local path starting with '/', './', '../', or '~/'.",
+                )
+            changes["install_target"] = _tool_install_target(value, kind, config_dir=path.parent, env=env)
+    if "binary" in item:
+        binary = _config_string(item, "binary", path)
+        if any(char.isspace() for char in binary):
+            raise _config_error(path, f"'binary' for tool '{name}' must not contain whitespace.")
+        changes["binary"] = binary
+    if "min_version" in item:
+        min_version = _config_string(item, "min_version", path)
+        if parse_version(min_version) is None:
+            raise _config_error(path, f"'min_version' for tool '{name}' must be MAJOR.MINOR.PATCH.")
+        changes["min_version"] = min_version.lstrip("v")
+    if "linux_only" in item:
+        if not isinstance(item["linux_only"], bool):
+            raise _config_error(path, f"'linux_only' for tool '{name}' must be a boolean.")
+        changes["linux_only"] = item["linux_only"]
+    # Never default a new tool to a public index package that merely shares its name.
+    if base is None and "install_target" not in changes:
+        raise _config_error(path, f"tool '{name}' requires an 'install_target' (or 'package').")
+    return replace(spec, **changes)
+
+
+def _parse_plugin_entry(
+    item: Mapping[str, Any],
+    base: PluginSpec | None,
+    *,
+    path: Path,
+    env: Mapping[str, str],
+) -> PluginSpec:
+    name = item["name"]
+    changes: dict[str, Any] = {}
+    if "source" in item:
+        value = _config_string(item, "source", path)
+        kind = _classify_source(value)
+        if kind not in ("local", "git", "scp", "github"):
+            raise _config_error(
+                path,
+                f"'source' for plugin '{name}' must be a Git URL, GitHub owner/repo, or a local path "
+                "starting with '/', './', '../', or '~/'.",
+            )
+        if kind == "local":
+            value = _resolve_local_source(value, config_dir=path.parent, env=env)
+        changes["source"] = value
+    elif base is None:
+        raise _config_error(path, f"plugin '{name}' requires a 'source'.")
+    if "clients" in item:
+        clients = item["clients"]
+        if (
+            not isinstance(clients, list)
+            or not clients
+            or any(client not in SUPPORTED_CLIENTS for client in clients)
+            or len(set(clients)) != len(clients)
+        ):
+            raise _config_error(
+                path,
+                f"'clients' for plugin '{name}' must be a non-empty list of unique values from: "
+                f"{', '.join(SUPPORTED_CLIENTS)}.",
+            )
+        changes["clients"] = tuple(clients)
+    if "cli" in item:
+        changes["cli"] = _config_string(item, "cli", path)
+    if base is None:
+        return PluginSpec(name=name, **changes)
+    return replace(base, **changes)
+
+
+def load_host_config(env: Mapping[str, str] | None = None) -> HostConfig:
+    """Load the host configuration and merge it over the built-in tools and plugins.
+
+    An entry named like a built-in overrides only the keys it sets; other entries are appended.
+    """
+
+    effective_env = _effective_env(env)
+    path = effective_host_config_path(effective_env)
+    if path.is_dir():
+        raise _config_error(path, "path is a directory.")
+    if not path.exists():
+        return HostConfig(path=path, exists=False)
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise _config_error(path, str(exc)) from exc
+
+    unknown = sorted(set(data) - HOST_CONFIG_KEYS)
+    if unknown:
+        raise _config_error(path, f"unknown key(s): {', '.join(unknown)}. Allowed keys: plugins, tools.")
+
+    tools = {spec.name: spec for spec in BUILTIN_TOOLS}
+    user_tools = _config_entries(data, "tools", HOST_TOOL_KEYS, path)
+    for item in user_tools:
+        tools[item["name"]] = _parse_tool_entry(item, tools.get(item["name"]), path=path, env=effective_env)
+
+    plugins = {spec.name: spec for spec in BUILTIN_PLUGINS}
+    user_plugins = _config_entries(data, "plugins", HOST_PLUGIN_KEYS, path)
+    for item in user_plugins:
+        plugin = _parse_plugin_entry(item, plugins.get(item["name"]), path=path, env=effective_env)
+        if plugin.cli is not None and plugin.cli not in tools:
+            raise _config_error(path, f"plugin '{plugin.name}' references unknown tool cli = '{plugin.cli}'.")
+        plugins[plugin.name] = plugin
+
+    return HostConfig(
+        path=path,
+        exists=True,
+        tools=tuple(tools.values()),
+        plugins=tuple(plugins.values()),
+        user_tools=tuple(item["name"] for item in user_tools),
+        user_plugins=tuple(item["name"] for item in user_plugins),
+    )
 
 
 def parse_clients_arg(raw: str | None) -> list[str] | None:
@@ -84,6 +362,14 @@ def _which(binary: str, env: Mapping[str, str]) -> str | None:
     return shutil.which(binary, path=env.get("PATH"))
 
 
+def _tool_applies(spec: CliSpec, *, is_linux: bool, with_agcoord: bool) -> bool:
+    return not spec.linux_only or is_linux or (with_agcoord and spec.name == "agcoord")
+
+
+def _tool_identity(spec: CliSpec) -> dict[str, str]:
+    return {"package": spec.name, "install_target": spec.target}
+
+
 def _inspect_cli(
     spec: CliSpec,
     *,
@@ -92,9 +378,9 @@ def _inspect_cli(
     env: Mapping[str, str],
     findings: list[Finding],
 ) -> dict[str, Any]:
-    if spec.linux_only and not is_linux and not with_agcoord:
+    if not _tool_applies(spec, is_linux=is_linux, with_agcoord=with_agcoord):
         return {
-            "package": spec.package,
+            **_tool_identity(spec),
             "binary": spec.binary,
             "min_version": spec.min_version,
             "installed": False,
@@ -110,13 +396,13 @@ def _inspect_cli(
             Finding(
                 scope="host",
                 severity="error",
-                component=spec.package,
-                message=f"Required host CLI '{spec.binary}' ({spec.package} >= {spec.min_version}) was not found on PATH.",
-                remediation=f"uv tool install {spec.package}  # or: gardenia host setup",
+                component=spec.name,
+                message=f"Required host CLI '{spec.binary}' ({spec.name} >= {spec.min_version}) was not found on PATH.",
+                remediation=f"uv tool install {spec.target}  # or: gardenia host setup",
             )
         )
         return {
-            "package": spec.package,
+            **_tool_identity(spec),
             "binary": spec.binary,
             "min_version": spec.min_version,
             "installed": False,
@@ -135,13 +421,13 @@ def _inspect_cli(
             Finding(
                 scope="host",
                 severity="error",
-                component=spec.package,
+                component=spec.name,
                 message=f"Could not determine '{spec.binary}' version from '{path} --version': {detail}",
-                remediation=f"uv tool install --upgrade {spec.package}",
+                remediation=f"uv tool install --upgrade {spec.target}",
             )
         )
         return {
-            "package": spec.package,
+            **_tool_identity(spec),
             "binary": spec.binary,
             "min_version": spec.min_version,
             "installed": True,
@@ -157,13 +443,13 @@ def _inspect_cli(
             Finding(
                 scope="host",
                 severity="error",
-                component=spec.package,
+                component=spec.name,
                 message=f"Host CLI '{spec.binary}' version {version} is below minimum {spec.min_version}.",
-                remediation=f"uv tool install --upgrade {spec.package}  # or: gardenia host setup --upgrade",
+                remediation=f"uv tool install --upgrade {spec.target}  # or: gardenia host setup --upgrade",
             )
         )
         return {
-            "package": spec.package,
+            **_tool_identity(spec),
             "binary": spec.binary,
             "min_version": spec.min_version,
             "installed": True,
@@ -174,7 +460,7 @@ def _inspect_cli(
         }
 
     return {
-        "package": spec.package,
+        **_tool_identity(spec),
         "binary": spec.binary,
         "min_version": spec.min_version,
         "installed": True,
@@ -328,6 +614,7 @@ def _read_json_version(manifest_path: Path) -> str | None:
 def _inspect_codex_plugins(
     home: Path,
     findings: list[Finding],
+    specs: tuple[PluginSpec, ...],
 ) -> tuple[dict[str, dict[str, Any]], str | None]:
     """Read Codex plugin configuration and cached manifests without running interactive TUI."""
 
@@ -357,7 +644,7 @@ def _inspect_codex_plugins(
                 plugins_cfg = parsed["plugins"]
 
     results: dict[str, dict[str, Any]] = {}
-    for pkg in PLUGIN_PACKAGES:
+    for pkg in [spec.name for spec in specs]:
         plugin_id = f"{pkg}@{pkg}"
         entry = plugins_cfg.get(plugin_id)
         configured = isinstance(entry, dict)
@@ -380,10 +667,12 @@ def _inspect_codex_plugins(
 
         version: str | None = None
         version_source: str | None = None
+        install_path: str | None = None
         if cached_versions:
             cached_versions.sort(key=lambda item: item[0], reverse=True)
             version = cached_versions[0][1]
             version_source = str(cached_versions[0][2])
+            install_path = str(cached_versions[0][2].parent)
         else:
             tmp_manifest = home / ".codex" / ".tmp" / "marketplaces" / pkg / "plugin.json"
             if tmp_manifest.is_file():
@@ -399,14 +688,20 @@ def _inspect_codex_plugins(
             "scope": "user" if configured else None,
             "marketplace_present": marketplace_present,
             "version_source": version_source,
+            "install_path": install_path,
         }
     return results, config_error
+
+
+def _optional_path(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def _inspect_agy_plugins(
     binary_path: str,
     env: Mapping[str, str],
     findings: list[Finding],
+    specs: tuple[PluginSpec, ...],
 ) -> tuple[dict[str, dict[str, Any]], str | None]:
     result = run_cmd([binary_path, "plugin", "list", "--json"], timeout=DEFAULT_TIMEOUT_SECONDS, env=env)
     if not result.ok:
@@ -456,7 +751,7 @@ def _inspect_agy_plugins(
             by_name[item["name"]] = item
 
     results: dict[str, dict[str, Any]] = {}
-    for pkg in PLUGIN_PACKAGES:
+    for pkg in [spec.name for spec in specs]:
         entry = by_name.get(pkg)
         if entry is None:
             results[pkg] = {
@@ -472,6 +767,7 @@ def _inspect_agy_plugins(
                 "enabled": bool(entry.get("enabled", True)),
                 "version": str(raw_version).strip() if isinstance(raw_version, str) and raw_version.strip() else None,
                 "scope": "user",
+                "install_path": _optional_path(entry.get("path")),
             }
     return results, None
 
@@ -480,6 +776,7 @@ def _inspect_claude_plugins(
     binary_path: str,
     env: Mapping[str, str],
     findings: list[Finding],
+    specs: tuple[PluginSpec, ...],
 ) -> tuple[dict[str, dict[str, Any]], str | None]:
     result = run_cmd([binary_path, "plugin", "list", "--json"], timeout=DEFAULT_TIMEOUT_SECONDS, env=env)
     if not result.ok:
@@ -524,7 +821,7 @@ def _inspect_claude_plugins(
         return {}, msg
 
     results: dict[str, dict[str, Any]] = {}
-    for pkg in PLUGIN_PACKAGES:
+    for pkg in [spec.name for spec in specs]:
         exact_id = f"{pkg}@{pkg}"
         candidates = [
             item
@@ -556,21 +853,39 @@ def _inspect_claude_plugins(
                 "enabled": bool(entry.get("enabled", True)),
                 "version": str(raw_version).strip() if isinstance(raw_version, str) and raw_version.strip() else None,
                 "scope": str(entry.get("scope")) if entry.get("scope") is not None else None,
+                "install_path": _optional_path(entry.get("installPath")),
             }
     return results, None
 
 
-def _plugin_install_remediation(client: str, pkg: str) -> str:
+def _marketplace_source(plugin: PluginSpec) -> str:
+    """Return the ``claude`` / ``codex`` ``plugin marketplace add`` argument."""
+
+    return plugin.source.removeprefix("git+")
+
+
+def _agy_source(plugin: PluginSpec) -> str:
+    """Return the ``agy plugin install`` argument."""
+
+    if _classify_source(plugin.source) == "github":
+        return f"https://github.com/{plugin.source}"
+    return plugin.source.removeprefix("git+")
+
+
+def _plugin_install_remediation(client: str, plugin: PluginSpec) -> str:
+    pkg = plugin.name
     if client == "agy":
-        return f"agy plugin install https://github.com/{GITHUB_OWNER}/{pkg}"
+        return f"agy plugin install {_agy_source(plugin)}"
+    source = _marketplace_source(plugin)
     if client == "claude":
-        return f"claude plugin marketplace add {GITHUB_OWNER}/{pkg} && claude plugin install {pkg}@{pkg} --scope user"
-    return f"codex plugin marketplace add {GITHUB_OWNER}/{pkg} && codex plugin add {pkg}@{pkg}"
+        return f"claude plugin marketplace add {source} && claude plugin install {pkg}@{pkg} --scope user"
+    return f"codex plugin marketplace add {source} && codex plugin add {pkg}@{pkg}"
 
 
-def _plugin_upgrade_remediation(client: str, pkg: str) -> str:
+def _plugin_upgrade_remediation(client: str, plugin: PluginSpec) -> str:
+    pkg = plugin.name
     if client == "agy":
-        return f"agy plugin uninstall {pkg} && agy plugin install https://github.com/{GITHUB_OWNER}/{pkg}"
+        return f"agy plugin uninstall {pkg} && agy plugin install {_agy_source(plugin)}"
     if client == "claude":
         return f"claude plugin marketplace update {pkg} && claude plugin update {pkg}@{pkg} --scope user"
     return f"codex plugin marketplace upgrade {pkg} && codex plugin add {pkg}@{pkg}"
@@ -589,8 +904,10 @@ def _evaluate_client_plugins(
     plugins: dict[str, dict[str, Any]],
     cli_versions: dict[str, str | None],
     findings: list[Finding],
+    specs: tuple[PluginSpec, ...],
 ) -> None:
-    for pkg in PLUGIN_PACKAGES:
+    for spec in specs:
+        pkg = spec.name
         info = plugins.get(pkg)
         if info is None:
             continue
@@ -601,7 +918,7 @@ def _evaluate_client_plugins(
                     severity="error",
                     component=f"{client}:{pkg}",
                     message=f"User-scoped plugin '{pkg}' is not installed for client '{client}'.",
-                    remediation=_plugin_install_remediation(client, pkg),
+                    remediation=_plugin_install_remediation(client, spec),
                 )
             )
             continue
@@ -615,8 +932,8 @@ def _evaluate_client_plugins(
                     remediation=_plugin_enable_remediation(client, pkg),
                 )
             )
-        if pkg in CLI_WITH_PLUGINS:
-            cli_ver = cli_versions.get(pkg)
+        if spec.cli is not None:
+            cli_ver = cli_versions.get(spec.cli)
             plugin_ver = info.get("version")
             if cli_ver and plugin_ver and cli_ver != plugin_ver:
                 findings.append(
@@ -628,7 +945,7 @@ def _evaluate_client_plugins(
                             f"Version drift in client '{client}' for '{pkg}': "
                             f"plugin is {plugin_ver} while host CLI is {cli_ver}."
                         ),
-                        remediation=_plugin_upgrade_remediation(client, pkg),
+                        remediation=_plugin_upgrade_remediation(client, spec),
                     )
                 )
 
@@ -772,11 +1089,12 @@ def check_host(
     effective_platform = sys.platform if platform is None else platform
     is_linux = effective_platform.startswith("linux")
     home = _effective_home(effective_env)
+    config = load_host_config(effective_env)
     findings: list[Finding] = []
 
     clis: dict[str, dict[str, Any]] = {}
-    for spec in CLI_SPECS:
-        clis[spec.package] = _inspect_cli(
+    for spec in config.tools:
+        clis[spec.name] = _inspect_cli(
             spec,
             is_linux=is_linux,
             with_agcoord=with_agcoord,
@@ -828,15 +1146,16 @@ def check_host(
             }
             continue
 
+        specs = config.plugins_for(client)
         if client == "codex":
-            plugins, err = _inspect_codex_plugins(home, findings)
+            plugins, err = _inspect_codex_plugins(home, findings, specs)
         elif client == "agy":
-            plugins, err = _inspect_agy_plugins(path, effective_env, findings)
+            plugins, err = _inspect_agy_plugins(path, effective_env, findings, specs)
         else:
-            plugins, err = _inspect_claude_plugins(path, effective_env, findings)
+            plugins, err = _inspect_claude_plugins(path, effective_env, findings, specs)
 
         if err is None:
-            _evaluate_client_plugins(client, plugins, cli_versions, findings)
+            _evaluate_client_plugins(client, plugins, cli_versions, findings, specs)
 
         clients_report[client] = {
             "installed": True,
@@ -856,6 +1175,7 @@ def check_host(
         "broker": broker,
         "clients": clients_report,
         "agroute_config": agroute_config,
+        "config": config.to_dict(),
     }
 
     return {
@@ -888,6 +1208,21 @@ def _select_installer(installer: str, env: Mapping[str, str]) -> str:
             )
         return installer
     raise GardeniaError(f"Unsupported installer '{installer}'. Use auto, uv, or pipx.", exit_code=2)
+
+
+def _uv_upgrade_command(spec: CliSpec) -> list[str]:
+    command = ["uv", "tool", "install", "--upgrade"]
+    if _classify_source(spec.target) == "local":
+        # A local checkout can change without a version bump, so force a rebuild.
+        command.append("--reinstall")
+    return [*command, spec.target]
+
+
+def _distribution_name(spec: CliSpec) -> str:
+    """Return the name ``pipx upgrade`` knows an installed tool by."""
+
+    match = _PACKAGE_TARGET_RE.match(spec.target)
+    return match["dist"] if match else spec.name
 
 
 def _render_agroute_reserve_config(
@@ -942,6 +1277,7 @@ def setup_host(
     effective_env = _effective_env(env)
     effective_platform = sys.platform if platform is None else platform
     is_linux = effective_platform.startswith("linux")
+    config = load_host_config(effective_env)
 
     state = check_host(
         clients=clients,
@@ -994,10 +1330,12 @@ def setup_host(
     actions: list[PlannedAction] = []
 
     # 1. Python CLI tools.
-    target_specs = [spec for spec in CLI_SPECS if not spec.linux_only or include_agcoord]
+    target_specs = [
+        spec for spec in config.tools if _tool_applies(spec, is_linux=is_linux, with_agcoord=with_agcoord)
+    ]
     needs_installer = any(
-        (not state["clis"][spec.package]["installed"])
-        or state["clis"][spec.package]["status"] != "ok"
+        (not state["clis"][spec.name]["installed"])
+        or state["clis"][spec.name]["status"] != "ok"
         or upgrade
         for spec in target_specs
     )
@@ -1011,47 +1349,47 @@ def setup_host(
 
     agcoord_cli_mutated = False
     for spec in target_specs:
-        cli_info = state["clis"][spec.package]
+        cli_info = state["clis"][spec.name]
         installed = bool(cli_info["installed"])
         status = cli_info["status"]
         if not installed:
             cmd = (
-                ["uv", "tool", "install", spec.package]
+                ["uv", "tool", "install", spec.target]
                 if chosen_installer == "uv"
-                else ["pipx", "install", spec.package]
+                else ["pipx", "install", spec.target]
             )
             actions.append(
                 PlannedAction(
                     kind="command",
-                    component=spec.package,
-                    description=f"Install {spec.package} CLI via {chosen_installer}.",
+                    component=spec.name,
+                    description=f"Install {spec.name} CLI via {chosen_installer}.",
                     command=cmd,
                 )
             )
-            if spec.package == "agcoord":
+            if spec.name == "agcoord":
                 agcoord_cli_mutated = True
         elif upgrade or status != "ok":
             cmd = (
-                ["uv", "tool", "install", "--upgrade", spec.package]
+                _uv_upgrade_command(spec)
                 if chosen_installer == "uv"
-                else ["pipx", "upgrade", spec.package]
+                else ["pipx", "upgrade", _distribution_name(spec)]
             )
             actions.append(
                 PlannedAction(
                     kind="command",
-                    component=spec.package,
-                    description=f"Upgrade {spec.package} CLI via {chosen_installer}.",
+                    component=spec.name,
+                    description=f"Upgrade {spec.name} CLI via {chosen_installer}.",
                     command=cmd,
                 )
             )
-            if spec.package == "agcoord":
+            if spec.name == "agcoord":
                 agcoord_cli_mutated = True
         else:
             actions.append(
                 PlannedAction(
                     kind="skip",
-                    component=spec.package,
-                    description=f"{spec.package} {cli_info['version']} already satisfies >= {spec.min_version}.",
+                    component=spec.name,
+                    description=f"{spec.name} {cli_info['version']} already satisfies >= {spec.min_version}.",
                     status="skipped",
                 )
             )
@@ -1123,17 +1461,18 @@ def setup_host(
     cli_versions = {pkg: info.get("version") for pkg, info in state["clis"].items()}
     for client in target_clients:
         client_plugins = state["clients"].get(client, {}).get("plugins", {})
-        for pkg in PLUGIN_PACKAGES:
+        for plugin in config.plugins_for(client):
+            pkg = plugin.name
             pinfo = client_plugins.get(pkg, {})
             installed = bool(pinfo.get("installed"))
             enabled = bool(pinfo.get("enabled"))
             plugin_ver = pinfo.get("version")
-            cli_ver = cli_versions.get(pkg) if pkg in CLI_WITH_PLUGINS else None
+            cli_ver = cli_versions.get(plugin.cli) if plugin.cli is not None else None
             drifted = bool(cli_ver and plugin_ver and cli_ver != plugin_ver)
             needs_refresh = upgrade or drifted
 
             if client == "agy":
-                url = f"https://github.com/{GITHUB_OWNER}/{pkg}"
+                url = _agy_source(plugin)
                 if not installed:
                     actions.append(
                         PlannedAction(
@@ -1180,13 +1519,14 @@ def setup_host(
                     )
             elif client == "claude":
                 plugin_id = f"{pkg}@{pkg}"
+                source = _marketplace_source(plugin)
                 if not installed:
                     actions.append(
                         PlannedAction(
                             kind="command",
                             component=f"claude:{pkg}",
-                            description=f"Register Claude Code marketplace '{GITHUB_OWNER}/{pkg}'.",
-                            command=["claude", "plugin", "marketplace", "add", f"{GITHUB_OWNER}/{pkg}"],
+                            description=f"Register Claude Code marketplace '{source}'.",
+                            command=["claude", "plugin", "marketplace", "add", source],
                         )
                     )
                     actions.append(
@@ -1235,14 +1575,15 @@ def setup_host(
             elif client == "codex":
                 plugin_id = f"{pkg}@{pkg}"
                 marketplace_present = bool(pinfo.get("marketplace_present"))
+                source = _marketplace_source(plugin)
                 if not installed:
                     if not marketplace_present:
                         actions.append(
                             PlannedAction(
                                 kind="command",
                                 component=f"codex:{pkg}",
-                                description=f"Register Codex marketplace '{GITHUB_OWNER}/{pkg}'.",
-                                command=["codex", "plugin", "marketplace", "add", f"{GITHUB_OWNER}/{pkg}"],
+                                description=f"Register Codex marketplace '{source}'.",
+                                command=["codex", "plugin", "marketplace", "add", source],
                             )
                         )
                     actions.append(
@@ -1268,8 +1609,8 @@ def setup_host(
                             PlannedAction(
                                 kind="command",
                                 component=f"codex:{pkg}",
-                                description=f"Register Codex marketplace '{GITHUB_OWNER}/{pkg}'.",
-                                command=["codex", "plugin", "marketplace", "add", f"{GITHUB_OWNER}/{pkg}"],
+                                description=f"Register Codex marketplace '{source}'.",
+                                command=["codex", "plugin", "marketplace", "add", source],
                             )
                         )
                     actions.append(
@@ -1340,3 +1681,247 @@ def setup_host(
         "actions": [action.to_dict() for action in actions],
         "agroute_config_preview": rendered_reserve_toml if (dry_run and rendered_reserve_toml) else None,
     }
+
+
+@dataclass(frozen=True)
+class SnippetResolution:
+    """Outcome of locating one tool's static ``AGENTS.snippet.md`` on this host."""
+
+    name: str
+    body: str | None = None
+    path: str | None = None
+    origin: str | None = None
+    installed: bool = False
+    error: str | None = None
+
+
+class HostInventory:
+    """Lazily inspected, cached host state shared across repository verifications."""
+
+    def __init__(self, env: Mapping[str, str] | None = None, *, platform: str | None = None) -> None:
+        self.env = _effective_env(env)
+        self.platform = sys.platform if platform is None else platform
+        self.config = load_host_config(self.env)
+        self._clients: dict[str, tuple[dict[str, dict[str, Any]], str | None, list[Finding]]] = {}
+        self._clis: dict[tuple[str, bool], tuple[dict[str, Any], list[Finding]]] = {}
+
+    def client_plugins(self, client: str) -> tuple[dict[str, dict[str, Any]], str | None, list[Finding]]:
+        """Return ``(plugins, error, findings)`` for one client without running tool binaries."""
+
+        if client not in self._clients:
+            findings: list[Finding] = []
+            specs = self.config.plugins_for(client)
+            path = _which(client, self.env)
+            if client == "codex":
+                plugins, error = _inspect_codex_plugins(_effective_home(self.env), findings, specs)
+            elif path is None:
+                plugins, error = {}, "not-on-path"
+            elif client == "agy":
+                plugins, error = _inspect_agy_plugins(path, self.env, findings, specs)
+            else:
+                plugins, error = _inspect_claude_plugins(path, self.env, findings, specs)
+            self._clients[client] = (plugins, error, findings)
+        return self._clients[client]
+
+    def cli(self, spec: CliSpec, *, with_agcoord: bool = False) -> tuple[dict[str, Any], list[Finding]]:
+        key = (spec.name, with_agcoord)
+        if key not in self._clis:
+            findings: list[Finding] = []
+            info = _inspect_cli(
+                spec,
+                is_linux=self.platform.startswith("linux"),
+                with_agcoord=with_agcoord,
+                env=self.env,
+                findings=findings,
+            )
+            self._clis[key] = (info, findings)
+        return self._clis[key]
+
+    def resolve_snippet(self, name: str) -> SnippetResolution:
+        """Locate ``<plugin_root>/AGENTS.snippet.md`` for a configured plugin.
+
+        Installed plugin roots win (highest version, then ``codex``, ``claude``, ``agy``);
+        a local-directory plugin source is the fallback.
+        """
+
+        plugin = self.config.plugin(name)
+        if plugin is None:
+            return SnippetResolution(name=name, error=f"no plugin named '{name}' is configured in {self.config.path}")
+
+        installed = False
+        problems: list[str] = []
+        candidates: list[tuple[tuple[int, int, int, int, str], int, str, Path]] = []
+        for index, client in enumerate(SUPPORTED_CLIENTS):
+            if client not in plugin.clients:
+                continue
+            plugins, error, _ = self.client_plugins(client)
+            if error is not None and error != "not-on-path":
+                problems.append(f"{client} plugin inspection failed: {error}")
+            info = plugins.get(name)
+            if not info or not info.get("installed"):
+                continue
+            installed = True
+            if not info.get("install_path"):
+                continue
+            snippet = Path(info["install_path"]) / PLUGIN_SNIPPET_FILENAME
+            if snippet.is_file():
+                rank = parse_version(info.get("version")) or (-1, -1, -1, 0, "")
+                candidates.append((rank, -index, client, snippet))
+
+        origin: str | None = None
+        path: Path | None = None
+        if candidates:
+            _, _, origin, path = max(candidates, key=lambda item: (item[0], item[1]))
+        elif _classify_source(plugin.source) == "local":
+            local = Path(plugin.source) / PLUGIN_SNIPPET_FILENAME
+            if local.is_file():
+                origin, path = "local-source", local
+
+        if path is None:
+            reason = (
+                f"installed plugin '{name}' ships no {PLUGIN_SNIPPET_FILENAME}"
+                if installed
+                else f"plugin '{name}' is not installed for any of: {', '.join(plugin.clients)}"
+            )
+            return SnippetResolution(name=name, installed=installed, error="; ".join([reason, *problems]))
+        try:
+            body = normalize_snippet(name, path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as exc:
+            return SnippetResolution(name=name, path=str(path), installed=installed, error=str(exc))
+        except GardeniaError as exc:
+            return SnippetResolution(name=name, path=str(path), installed=installed, error=exc.message)
+        return SnippetResolution(name=name, body=body, path=str(path), origin=origin, installed=installed)
+
+
+def resolve_tool_snippets(
+    names: tuple[str, ...] | list[str],
+    *,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, SnippetResolution]:
+    """Resolve the ``AGENTS.snippet.md`` for each named tool from this host."""
+
+    inventory = HostInventory(env)
+    return {name: inventory.resolve_snippet(name) for name in names}
+
+
+def verify_repo_tools(
+    tools: list[str] | tuple[str, ...],
+    inventory: HostInventory,
+    *,
+    repo_root: Path,
+    stealth: bool = False,
+    clients: list[str] | None = None,
+    with_agcoord: bool = False,
+) -> list[Finding]:
+    """Check host readiness and sibling block sync for the tools a repository declares.
+
+    Host findings are worded identically to ``check_host`` so combined reports can
+    deduplicate them. Stealth repositories skip the tracked-block comparison.
+    """
+
+    findings: list[Finding] = []
+    config = inventory.config
+    detected = [name for name in SUPPORTED_CLIENTS if _which(name, inventory.env) is not None]
+    agents_path = repo_root / "AGENTS.md"
+    agents_text = agents_path.read_text(encoding="utf-8") if agents_path.is_file() else ""
+
+    for name in tools:
+        plugin = config.plugin(name)
+        spec = config.tool(plugin.cli if plugin is not None and plugin.cli else name)
+        if plugin is None and spec is None:
+            findings.append(
+                Finding(
+                    scope="host",
+                    severity="error",
+                    component=name,
+                    message=f"Repository declares tool '{name}', but it is not configured on this host.",
+                    remediation=f"Add [[tools]] / [[plugins]] entries for '{name}' to {config.path}",
+                )
+            )
+            continue
+
+        cli_version: str | None = None
+        if spec is not None:
+            info, cli_findings = inventory.cli(spec, with_agcoord=with_agcoord)
+            cli_version = info.get("version")
+            findings.extend(cli_findings)
+
+        if plugin is None:
+            findings.append(
+                Finding(
+                    scope="host",
+                    severity="warning",
+                    component=name,
+                    message=(
+                        f"Tool '{name}' has no [[plugins]] entry on this host, so its AGENTS.md block "
+                        "cannot be verified."
+                    ),
+                    remediation=f"Add a [[plugins]] entry for '{name}' to {config.path}",
+                )
+            )
+            continue
+
+        requested = detected if clients is None else clients
+        target_clients = [client for client in requested if client in plugin.clients]
+        # An explicit --clients selection that excludes the plugin is intentional.
+        if not target_clients and clients is None:
+            findings.append(
+                Finding(
+                    scope="host",
+                    severity="warning",
+                    component=name,
+                    message=f"No target client is available to verify plugin '{name}' installation.",
+                    remediation=f"Install one of: {', '.join(plugin.clients)}",
+                )
+            )
+        for client in target_clients:
+            if client not in detected:
+                findings.append(
+                    Finding(
+                        scope="host",
+                        severity="error",
+                        component=client,
+                        message=f"Requested agent client '{client}' was not found on PATH.",
+                        remediation=f"Install '{client}' or omit it from --clients.",
+                    )
+                )
+                continue
+            plugins, error, client_findings = inventory.client_plugins(client)
+            findings.extend(client_findings)
+            if error is None:
+                versions = {spec.name: cli_version} if spec is not None else {}
+                _evaluate_client_plugins(client, plugins, versions, findings, (plugin,))
+
+        if stealth:
+            continue
+        resolution = inventory.resolve_snippet(name)
+        if resolution.body is None:
+            # A missing installation is already reported per client above.
+            if resolution.installed or resolution.path is not None:
+                findings.append(
+                    Finding(
+                        scope="host",
+                        severity="error",
+                        component=name,
+                        message=f"Could not verify the '{name}' AGENTS.md block: {resolution.error}.",
+                        remediation=f"Reinstall or upgrade plugin '{name}' so it ships {PLUGIN_SNIPPET_FILENAME}",
+                    )
+                )
+            continue
+        block, _ = extract_sibling_block(agents_text, name)
+        if block is not None and block != render_sibling_block(name, resolution.body):
+            findings.append(
+                Finding(
+                    scope="repo",
+                    severity="warning",
+                    component=f"agents-md:{name}",
+                    message=f"AGENTS.md '{name}' block has drifted from the installed {PLUGIN_SNIPPET_FILENAME}.",
+                    remediation="gardenia repo init",
+                )
+            )
+
+    unique: list[Finding] = []
+    for finding in findings:
+        if finding not in unique:
+            unique.append(finding)
+    return unique

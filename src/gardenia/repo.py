@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tomllib
 from typing import Any, Mapping
@@ -15,8 +16,11 @@ from gardenia.models import (
     CHECK_FORMAT,
     DEFAULT_TIMEOUT_SECONDS,
     DEFAULT_TMPFS_INODES,
+    ENTRY_NAME_RE,
     MANAGED_BEGIN,
     MANAGED_END,
+    PLUGIN_SNIPPET_FILENAME,
+    RESERVED_ENTRY_NAMES,
     Finding,
     GardeniaError,
     PlannedAction,
@@ -41,8 +45,11 @@ CONFIG_KEYS = frozenset(
         "agcoord",
         "docs_exemption",
         "claude_symlink",
+        "tools",
     }
 )
+
+_ANY_BLOCK_MARKER_RE = re.compile(r"<!--\s*[A-Za-z0-9][A-Za-z0-9._-]*:(?:begin|end)\s*-->")
 
 
 @dataclass(frozen=True)
@@ -58,6 +65,7 @@ class RepoProfile:
     agcoord: str = "auto"
     docs_exemption: bool = True
     claude_symlink: bool = True
+    tools: tuple[str, ...] = ()
 
     def validate(self) -> None:
         if not isinstance(self.gate, str) or not self.gate.strip():
@@ -84,6 +92,18 @@ class RepoProfile:
             raise GardeniaError("Repo profile 'docs_exemption' must be a boolean.", exit_code=2)
         if not isinstance(self.claude_symlink, bool):
             raise GardeniaError("Repo profile 'claude_symlink' must be a boolean.", exit_code=2)
+        if not isinstance(self.tools, tuple) or any(
+            not isinstance(item, str) or not ENTRY_NAME_RE.fullmatch(item) for item in self.tools
+        ):
+            raise GardeniaError(
+                "Repo profile 'tools' must be a list of tool names (letters, digits, '.', '_', '-').",
+                exit_code=2,
+            )
+        if len(set(self.tools)) != len(self.tools):
+            raise GardeniaError("Repo profile 'tools' must not contain duplicate names.", exit_code=2)
+        reserved = sorted(set(self.tools) & RESERVED_ENTRY_NAMES)
+        if reserved:
+            raise GardeniaError(f"Repo profile 'tools' must not list reserved name(s): {', '.join(reserved)}.", exit_code=2)
 
     def memory_bytes(self) -> int:
         return int(round(float(self.memory_gb) * GIB))
@@ -94,7 +114,9 @@ class RepoProfile:
         return int(round(float(self.tmpfs_gb) * GIB))
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data["tools"] = list(self.tools)
+        return data
 
 
 @dataclass(frozen=True)
@@ -176,11 +198,12 @@ def _parse_profile_table(table: dict[str, Any], source_label: str) -> RepoProfil
             f"Allowed keys: {', '.join(sorted(CONFIG_KEYS))}.",
             exit_code=2,
         )
-    defaults = RepoProfile()
-    kwargs: dict[str, Any] = defaults.to_dict()
+    kwargs: dict[str, Any] = {}
     for key, val in table.items():
         if key in ("memory_gb", "tmpfs_gb") and not isinstance(val, bool) and isinstance(val, (int, float)):
             kwargs[key] = float(val)
+        elif key == "tools" and isinstance(val, list):
+            kwargs[key] = tuple(val)
         else:
             kwargs[key] = val
     profile = RepoProfile(**kwargs)
@@ -188,9 +211,65 @@ def _parse_profile_table(table: dict[str, Any], source_label: str) -> RepoProfil
     return profile
 
 
-def load_repo_config(repo_root: Path) -> dict[str, Any]:
-    """Load tracked gardenia profile from ``gardenia.toml`` or ``pyproject.toml`` ``[tool.gardenia]``."""
+def stealth_profile_path(git_common_dir: Path) -> Path:
+    """Return the untracked stealth profile location shared by all worktrees of one clone."""
 
+    return git_common_dir / "gardenia" / "gardenia.toml"
+
+
+def _load_stealth_config(path: Path) -> dict[str, Any]:
+    error: str | None = None
+    profile = RepoProfile()
+    try:
+        profile = _parse_profile_table(tomllib.loads(path.read_text(encoding="utf-8")), str(path))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        error = str(exc)
+    except GardeniaError as exc:
+        error = exc.message
+    return {
+        "source": "stealth",
+        "path": str(path),
+        "valid": error is None,
+        "profile": profile,
+        "values": profile.to_dict(),
+        "error": error,
+        "duplicate_sources": False,
+        "stealth": True,
+        "stealth_ignored": False,
+    }
+
+
+def load_repo_config(repo_root: Path, git_common_dir: Path | None = None) -> dict[str, Any]:
+    """Load the repository profile.
+
+    Tracked ``gardenia.toml`` or ``pyproject.toml`` ``[tool.gardenia]`` take precedence. When
+    neither exists, an untracked stealth profile under ``git_common_dir`` applies.
+    """
+
+    stealth_path = stealth_profile_path(git_common_dir) if git_common_dir is not None else None
+    has_stealth = stealth_path is not None and stealth_path.is_file()
+    cfg = _load_tracked_config(repo_root)
+    tracked_section = cfg["source"] == "gardenia.toml" or (
+        cfg["source"] == "pyproject.toml" and _has_pyproject_gardenia_table(repo_root)
+    )
+    if has_stealth and not tracked_section:
+        assert stealth_path is not None
+        return _load_stealth_config(stealth_path)
+    cfg["stealth"] = False
+    cfg["stealth_ignored"] = has_stealth
+    return cfg
+
+
+def _has_pyproject_gardenia_table(repo_root: Path) -> bool:
+    try:
+        data = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    tool_section = data.get("tool")
+    return isinstance(tool_section, dict) and "gardenia" in tool_section
+
+
+def _load_tracked_config(repo_root: Path) -> dict[str, Any]:
     gardenia_toml = repo_root / "gardenia.toml"
     pyproject_toml = repo_root / "pyproject.toml"
 
@@ -307,6 +386,7 @@ def merge_profile_overrides(
     agcoord: str | None = None,
     docs_exemption: bool | None = None,
     claude_symlink: bool | None = None,
+    tools: list[str] | tuple[str, ...] | None = None,
 ) -> RepoProfile:
     """Overlay explicit CLI flags onto a loaded RepoProfile and validate."""
 
@@ -320,17 +400,22 @@ def merge_profile_overrides(
         agcoord=base.agcoord if agcoord is None else agcoord,
         docs_exemption=base.docs_exemption if docs_exemption is None else docs_exemption,
         claude_symlink=base.claude_symlink if claude_symlink is None else claude_symlink,
+        tools=base.tools if tools is None else tuple(dict.fromkeys(tools)),
     )
     merged.validate()
     return merged
 
 
-def render_gardenia_toml(profile: RepoProfile) -> str:
+def render_gardenia_toml(profile: RepoProfile, *, stealth: bool = False) -> str:
     """Serialize a RepoProfile to clean, deterministic ``gardenia.toml``."""
 
     profile.validate()
     lines = [
-        "# Tracked repository profile managed by gardenia.",
+        (
+            "# Untracked stealth repository profile managed by gardenia."
+            if stealth
+            else "# Tracked repository profile managed by gardenia."
+        ),
         f"gate = {json.dumps(profile.gate)}",
         f"cpu = {profile.cpu}",
         f"memory_gb = {float(profile.memory_gb):g}",
@@ -344,9 +429,11 @@ def render_gardenia_toml(profile: RepoProfile) -> str:
             f"agcoord = {json.dumps(profile.agcoord)}",
             f"docs_exemption = {'true' if profile.docs_exemption else 'false'}",
             f"claude_symlink = {'true' if profile.claude_symlink else 'false'}",
-            "",
         ]
     )
+    if profile.tools:
+        lines.append(f"tools = {json.dumps(list(profile.tools))}")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -490,23 +577,112 @@ def render_managed_block(profile: RepoProfile) -> str:
     return f"{MANAGED_BEGIN}\n{body}\n{MANAGED_END}"
 
 
+def block_markers(name: str) -> tuple[str, str]:
+    """Return the ``<!-- <name>:begin -->`` / ``<!-- <name>:end -->`` marker pair."""
+
+    return f"<!-- {name}:begin -->", f"<!-- {name}:end -->"
+
+
+def _extract_delimited_block(text: str, begin: str, end: str) -> tuple[str | None, bool]:
+    begin_count = text.count(begin)
+    end_count = text.count(end)
+    if begin_count == 0 and end_count == 0:
+        return None, False
+    if begin_count != 1 or end_count != 1:
+        return None, True
+    begin_idx = text.index(begin)
+    end_idx = text.index(end)
+    if end_idx < begin_idx:
+        return None, True
+    return text[begin_idx : end_idx + len(end)], False
+
+
 def extract_managed_block(text: str) -> tuple[str | None, bool]:
     """Extract the managed block from ``AGENTS.md``.
 
     Returns ``(block_text_or_none, malformed)``.
     """
 
-    begin_count = text.count(MANAGED_BEGIN)
-    end_count = text.count(MANAGED_END)
-    if begin_count == 0 and end_count == 0:
-        return None, False
-    if begin_count != 1 or end_count != 1:
+    return _extract_delimited_block(text, MANAGED_BEGIN, MANAGED_END)
+
+
+def extract_sibling_block(text: str, name: str) -> tuple[str | None, bool]:
+    """Extract the ``<!-- <name>:begin --> ... <!-- <name>:end -->`` sibling block.
+
+    Returns ``(block_text_or_none, malformed)``. A sibling block is also malformed when it
+    is empty, contains any other block marker, or sits inside the gardenia managed block.
+    """
+
+    begin, end = block_markers(name)
+    block, malformed = _extract_delimited_block(text, begin, end)
+    if block is None:
+        return None, malformed
+    inner = block[len(begin) : -len(end)]
+    if not inner.strip() or _ANY_BLOCK_MARKER_RE.search(inner):
         return None, True
-    begin_idx = text.index(MANAGED_BEGIN)
-    end_idx = text.index(MANAGED_END)
-    if end_idx < begin_idx:
-        return None, True
-    return text[begin_idx : end_idx + len(MANAGED_END)], False
+    managed, _ = extract_managed_block(text)
+    if managed is not None:
+        managed_start = text.index(MANAGED_BEGIN)
+        if managed_start < text.index(begin) < managed_start + len(managed):
+            return None, True
+    return block, False
+
+
+def normalize_snippet(name: str, text: str) -> str:
+    """Return the block body for a plugin ``AGENTS.snippet.md``.
+
+    The snippet may be a bare body or may already be wrapped in its own marker pair.
+    """
+
+    begin, end = block_markers(name)
+    body = text.replace("\r\n", "\n").lstrip("\ufeff").strip()
+    if body.startswith(begin) and body.endswith(end):
+        body = body[len(begin) : -len(end)].strip()
+    if not body:
+        raise GardeniaError(f"{PLUGIN_SNIPPET_FILENAME} for '{name}' is empty.", exit_code=2)
+    if _ANY_BLOCK_MARKER_RE.search(body):
+        raise GardeniaError(
+            f"{PLUGIN_SNIPPET_FILENAME} for '{name}' contains stray block markers; "
+            f"it may only be wrapped once in '{begin}' / '{end}'.",
+            exit_code=2,
+        )
+    return body
+
+
+def render_sibling_block(name: str, body: str) -> str:
+    """Wrap a normalized snippet body in its sibling marker pair."""
+
+    begin, end = block_markers(name)
+    return f"{begin}\n{body}\n{end}"
+
+
+def _append_block(existing: str, block: str) -> str:
+    if not existing:
+        return f"# Repository agent instructions\n\n{block}\n"
+    sep = "\n\n" if not existing.endswith("\n") else ("\n" if not existing.endswith("\n\n") else "")
+    return f"{existing}{sep}{block}\n"
+
+
+def _malformed_sibling_error(name: str) -> GardeniaError:
+    begin, end = block_markers(name)
+    return GardeniaError(
+        f"Malformed {name} markers in AGENTS.md: ensure exactly one '{begin}' precedes one '{end}', "
+        "with non-empty content that does not overlap any other managed block.",
+        exit_code=2,
+    )
+
+
+def apply_sibling_block(existing: str, name: str, body: str) -> str:
+    """Idempotently insert or replace ONLY the ``<name>`` sibling block."""
+
+    extracted, malformed = extract_sibling_block(existing, name)
+    if malformed:
+        raise _malformed_sibling_error(name)
+    block = render_sibling_block(name, body)
+    if extracted is None:
+        return _append_block(existing, block)
+    begin_idx = existing.index(extracted)
+    return existing[:begin_idx] + block + existing[begin_idx + len(extracted) :]
 
 
 def apply_managed_block(existing: str | None, block: str) -> str:
@@ -527,10 +703,7 @@ def apply_managed_block(existing: str | None, block: str) -> str:
         end_idx = existing.index(MANAGED_END) + len(MANAGED_END)
         return existing[:begin_idx] + block + existing[end_idx:]
 
-    if not existing:
-        return f"# Repository agent instructions\n\n{block}\n"
-    sep = "\n\n" if not existing.endswith("\n") else ("\n" if not existing.endswith("\n\n") else "")
-    return f"{existing}{sep}{block}\n"
+    return _append_block(existing, block)
 
 
 def _inspect_optional_toml(path: Path, component: str, findings: list[Finding]) -> dict[str, Any]:
@@ -716,6 +889,110 @@ def _inspect_agroute_local_store(
     }
 
 
+def _check_tracked_agents_md(
+    profile: RepoProfile,
+    *,
+    agents_exists: bool,
+    extracted_block: str | None,
+    block_malformed: bool,
+    findings: list[Finding],
+) -> bool | None:
+    """Validate the gardenia managed block and return its sync state."""
+
+    if not agents_exists:
+        findings.append(
+            Finding(
+                scope="repo",
+                severity="error",
+                component="agents-md",
+                message="Tracked AGENTS.md file is missing from the repository root.",
+                remediation="gardenia repo init",
+            )
+        )
+        return None
+    if block_malformed:
+        findings.append(
+            Finding(
+                scope="repo",
+                severity="error",
+                component="agents-md",
+                message=f"AGENTS.md has malformed '{MANAGED_BEGIN}' / '{MANAGED_END}' markers.",
+                remediation="Repair the marker pair in AGENTS.md, then run: gardenia repo init",
+            )
+        )
+        return False
+    if extracted_block is None:
+        findings.append(
+            Finding(
+                scope="repo",
+                severity="warning",
+                component="agents-md",
+                message="AGENTS.md exists but does not contain a gardenia managed block.",
+                remediation="gardenia repo init",
+            )
+        )
+        return False
+    if extracted_block != render_managed_block(profile):
+        findings.append(
+            Finding(
+                scope="repo",
+                severity="warning",
+                component="agents-md",
+                message="AGENTS.md managed block has drifted from the repository gardenia profile.",
+                remediation="gardenia repo init",
+            )
+        )
+        return False
+    return True
+
+
+def _check_sibling_blocks(sibling_blocks: Mapping[str, Mapping[str, bool]], findings: list[Finding]) -> None:
+    """Require one well-formed sibling block per declared tool, using repository files only."""
+
+    for name, state in sibling_blocks.items():
+        begin, end = block_markers(name)
+        if state["malformed"]:
+            message = f"AGENTS.md has malformed '{begin}' / '{end}' markers."
+            remediation = "Repair the marker pair in AGENTS.md, then run: gardenia repo init"
+        elif not state["present"]:
+            message = f"AGENTS.md is missing the '{begin}' / '{end}' block for declared tool '{name}'."
+            remediation = "gardenia repo init  # on a host with the plugin installed"
+        else:
+            continue
+        findings.append(
+            Finding(
+                scope="repo",
+                severity="error",
+                component=f"agents-md:{name}",
+                message=message,
+                remediation=remediation,
+            )
+        )
+
+
+def _check_stealth_markers(agents_text: str, profile: RepoProfile, findings: list[Finding]) -> None:
+    """Warn when a stealth repository's AGENTS.md carries markers that must stay uncommitted."""
+
+    present = [
+        name
+        for name in ("gardenia", *profile.tools)
+        if any(marker in agents_text for marker in block_markers(name))
+    ]
+    if present:
+        findings.append(
+            Finding(
+                scope="repo",
+                severity="warning",
+                component="agents-md",
+                message=(
+                    "A stealth profile is active, but AGENTS.md contains managed markers that must not be "
+                    f"committed: {', '.join(present)}."
+                ),
+                remediation="Remove those marker blocks from AGENTS.md",
+            )
+        )
+
+
 def check_repo(
     repo_path: str | os.PathLike[str] | None = None,
     *,
@@ -742,8 +1019,22 @@ def check_repo(
             )
         )
 
-    cfg = load_repo_config(git_info.root)
+    cfg = load_repo_config(git_info.root, git_info.git_common_dir)
     profile: RepoProfile = cfg["profile"]
+    stealth: bool = cfg["stealth"]
+    if cfg["stealth_ignored"]:
+        findings.append(
+            Finding(
+                scope="repo",
+                severity="warning",
+                component="gardenia-config",
+                message=(
+                    f"Untracked stealth profile {stealth_profile_path(git_info.git_common_dir)} is ignored "
+                    "because the repository has a tracked gardenia profile."
+                ),
+                remediation=f"Remove {stealth_profile_path(git_info.git_common_dir)}",
+            )
+        )
     if not cfg["valid"]:
         findings.append(
             Finding(
@@ -769,52 +1060,24 @@ def check_repo(
     agents_exists = agents_path.is_file()
     agents_text = agents_path.read_text(encoding="utf-8") if agents_exists else ""
     extracted_block, block_malformed = extract_managed_block(agents_text) if agents_exists else (None, False)
-    expected_block = render_managed_block(profile)
     in_sync: bool | None = None
-    if not agents_exists:
-        findings.append(
-            Finding(
-                scope="repo",
-                severity="error",
-                component="agents-md",
-                message="Tracked AGENTS.md file is missing from the repository root.",
-                remediation="gardenia repo init",
-            )
-        )
-    elif block_malformed:
-        in_sync = False
-        findings.append(
-            Finding(
-                scope="repo",
-                severity="error",
-                component="agents-md",
-                message=f"AGENTS.md has malformed '{MANAGED_BEGIN}' / '{MANAGED_END}' markers.",
-                remediation="Repair the marker pair in AGENTS.md, then run: gardenia repo init",
-            )
-        )
-    elif extracted_block is None:
-        in_sync = False
-        findings.append(
-            Finding(
-                scope="repo",
-                severity="warning",
-                component="agents-md",
-                message="AGENTS.md exists but does not contain a gardenia managed block.",
-                remediation="gardenia repo init",
-            )
-        )
+    sibling_blocks: dict[str, dict[str, bool]] = {}
+    for name in profile.tools:
+        sibling, sibling_malformed = extract_sibling_block(agents_text, name)
+        sibling_blocks[name] = {"present": sibling is not None, "malformed": sibling_malformed}
+
+    if stealth:
+        _check_stealth_markers(agents_text, profile, findings)
     else:
-        in_sync = extracted_block == expected_block
-        if not in_sync:
-            findings.append(
-                Finding(
-                    scope="repo",
-                    severity="warning",
-                    component="agents-md",
-                    message="AGENTS.md managed block has drifted from the repository gardenia profile.",
-                    remediation="gardenia repo init",
-                )
-            )
+        in_sync = _check_tracked_agents_md(
+            profile,
+            agents_exists=agents_exists,
+            extracted_block=extracted_block,
+            block_malformed=block_malformed,
+            findings=findings,
+        )
+        if agents_exists:
+            _check_sibling_blocks(sibling_blocks, findings)
 
     lower_agents = agents_text.lower()
     layers_referenced = {
@@ -824,7 +1087,11 @@ def check_repo(
         "agcoord": ("agcoord" in lower_agents) or ("agc " in lower_agents),
     }
 
-    claude_md = _inspect_claude_md(git_info.root, profile, findings)
+    claude_md = _inspect_claude_md(
+        git_info.root,
+        replace(profile, claude_symlink=False) if stealth else profile,
+        findings,
+    )
     howhard_toml = _inspect_optional_toml(git_info.root / "howhard.toml", "howhard-toml", findings)
     agroute_toml = _inspect_optional_toml(git_info.root / "agroute.toml", "agroute-toml", findings)
 
@@ -836,6 +1103,8 @@ def check_repo(
         "tracked": {
             "root": str(git_info.root),
             "is_linked_worktree": git_info.is_linked_worktree,
+            "stealth": stealth,
+            "sibling_blocks": sibling_blocks,
             "config": {
                 "source": cfg["source"],
                 "path": cfg["path"],
@@ -888,6 +1157,7 @@ def render_repo(
     agcoord: str | None = None,
     docs_exemption: bool | None = None,
     claude_symlink: bool | None = None,
+    tools: list[str] | tuple[str, ...] | None = None,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Render the managed ``AGENTS.md`` block using optional repo config + CLI overrides."""
@@ -897,7 +1167,7 @@ def render_repo(
     config_source = "defaults"
     if repo_path is not None:
         git_info = resolve_git_repo(repo_path, env=effective_env)
-        cfg = load_repo_config(git_info.root)
+        cfg = load_repo_config(git_info.root, git_info.git_common_dir)
         if not cfg["valid"]:
             raise GardeniaError(f"Invalid repository config ({cfg['path']}): {cfg['error']}", exit_code=2)
         base_profile = cfg["profile"]
@@ -905,7 +1175,7 @@ def render_repo(
     else:
         git_info = try_resolve_git_repo(None, env=effective_env)
         if git_info is not None:
-            cfg = load_repo_config(git_info.root)
+            cfg = load_repo_config(git_info.root, git_info.git_common_dir)
             if not cfg["valid"]:
                 raise GardeniaError(f"Invalid repository config ({cfg['path']}): {cfg['error']}", exit_code=2)
             base_profile = cfg["profile"]
@@ -922,6 +1192,7 @@ def render_repo(
         agcoord=agcoord,
         docs_exemption=docs_exemption,
         claude_symlink=claude_symlink,
+        tools=tools,
     )
     block = render_managed_block(profile)
     return {
@@ -930,6 +1201,124 @@ def render_repo(
         "profile": profile.to_dict(),
         "managed_block": block,
     }
+
+
+def _plan_agents_md_action(actions: list[PlannedAction], *, changed: bool, created: bool, path: Path) -> None:
+    if not changed:
+        actions.append(
+            PlannedAction(
+                kind="skip",
+                component="agents-md",
+                description="AGENTS.md managed block is already up to date.",
+                path=str(path),
+                status="skipped",
+            )
+        )
+        return
+    desc = "Create AGENTS.md with gardenia managed block." if created else "Update gardenia managed block in AGENTS.md."
+    actions.append(PlannedAction(kind="write_file", component="agents-md", description=desc, path=str(path)))
+
+
+def _plan_sibling_blocks(
+    actions: list[PlannedAction],
+    warnings: list[str],
+    text: str,
+    tools: tuple[str, ...],
+    *,
+    path: Path,
+    env: Mapping[str, str],
+) -> tuple[str, list[str]]:
+    """Stamp sibling blocks from resolved plugin snippets, preserving unresolved ones."""
+
+    # Host state is consulted only when the profile declares tools.
+    from gardenia.host import resolve_tool_snippets
+
+    for name in tools:
+        if extract_sibling_block(text, name)[1]:
+            raise _malformed_sibling_error(name)
+
+    resolutions = resolve_tool_snippets(tools, env=env)
+    unresolved: list[str] = []
+    for name in tools:
+        resolution = resolutions[name]
+        component = f"agents-md:{name}"
+        if resolution.body is None:
+            unresolved.append(name)
+            message = (
+                f"Could not resolve {PLUGIN_SNIPPET_FILENAME} for '{name}' ({resolution.error}); "
+                "its AGENTS.md block was left unchanged."
+            )
+            warnings.append(message)
+            actions.append(
+                PlannedAction(kind="skip", component=component, description=message, path=str(path), status="skipped")
+            )
+            continue
+        updated = apply_sibling_block(text, name, resolution.body)
+        if updated == text:
+            actions.append(
+                PlannedAction(
+                    kind="skip",
+                    component=component,
+                    description=f"AGENTS.md '{name}' block is already up to date.",
+                    path=str(path),
+                    status="skipped",
+                )
+            )
+        else:
+            actions.append(
+                PlannedAction(
+                    kind="write_file",
+                    component=component,
+                    description=f"Update AGENTS.md '{name}' block from {resolution.path}.",
+                    path=str(path),
+                )
+            )
+        text = updated
+    return text, unresolved
+
+
+def _plan_claude_symlink(
+    actions: list[PlannedAction],
+    warnings: list[str],
+    claude_path: Path,
+    *,
+    enabled: bool,
+    force: bool,
+) -> tuple[bool, bool]:
+    """Plan the ``CLAUDE.md -> AGENTS.md`` step and return ``(create, replace_existing)``."""
+
+    def _skip(description: str) -> tuple[bool, bool]:
+        actions.append(
+            PlannedAction(
+                kind="skip",
+                component="claude-md",
+                description=description,
+                path=str(claude_path),
+                status="skipped",
+            )
+        )
+        return False, False
+
+    def _link(description: str, *, replace_existing: bool) -> tuple[bool, bool]:
+        actions.append(
+            PlannedAction(kind="symlink", component="claude-md", description=description, path=str(claude_path))
+        )
+        return True, replace_existing
+
+    if not enabled:
+        return _skip("CLAUDE.md symlink management disabled by profile.")
+    if claude_path.is_symlink() and os.readlink(claude_path) == "AGENTS.md":
+        return _skip("CLAUDE.md symlink to AGENTS.md is already in place.")
+    if not claude_path.exists() and not claude_path.is_symlink():
+        return _link("Create symlink CLAUDE.md -> AGENTS.md.", replace_existing=False)
+    if force:
+        return _link("Replace existing CLAUDE.md with symlink CLAUDE.md -> AGENTS.md.", replace_existing=True)
+    warning_msg = (
+        "Skipping CLAUDE.md symlink because a non-matching file or symlink already exists "
+        "(pass --force-claude-symlink to replace it)."
+    )
+    warnings.append(warning_msg)
+    return _skip(warning_msg)
 
 
 def init_repo(
@@ -944,6 +1333,8 @@ def init_repo(
     agcoord: str | None = None,
     docs_exemption: bool | None = None,
     claude_symlink: bool | None = None,
+    tools: list[str] | tuple[str, ...] | None = None,
+    stealth: bool = False,
     force_claude_symlink: bool = False,
     save_config: bool = False,
     allow_worktree: bool = False,
@@ -951,11 +1342,17 @@ def init_repo(
     dry_run: bool = False,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Initialize or update tracked repository files (``AGENTS.md``, ``CLAUDE.md``, ``gardenia.toml``)."""
+    """Initialize or update tracked repository files (``AGENTS.md``, ``CLAUDE.md``, ``gardenia.toml``).
+
+    In stealth mode (``stealth=True`` or an existing stealth profile) only the untracked
+    profile under the Git common directory is written; tracked files are never touched.
+    """
 
     effective_env = _effective_env(env)
     git_info = resolve_git_repo(repo_path, env=effective_env)
-    if git_info.is_linked_worktree and not allow_worktree:
+    cfg = load_repo_config(git_info.root, git_info.git_common_dir)
+    stealth_active = stealth or cfg["stealth"]
+    if git_info.is_linked_worktree and not allow_worktree and not stealth_active:
         raise GardeniaError(
             f"Refusing to run 'repo init' inside linked Git worktree {git_info.root}. "
             "Run in the primary checkout or pass --allow-worktree explicitly.",
@@ -968,9 +1365,21 @@ def init_repo(
             exit_code=2,
         )
 
-    cfg = load_repo_config(git_info.root)
     if not cfg["valid"]:
         raise GardeniaError(f"Invalid repository config ({cfg['path']}): {cfg['error']}", exit_code=2)
+    stealth_path = stealth_profile_path(git_info.git_common_dir)
+    if stealth_active:
+        if not cfg["stealth"] and cfg["source"] != "defaults":
+            raise GardeniaError(
+                f"Refusing --stealth: the repository already has a tracked gardenia profile ({cfg['path']}).",
+                exit_code=2,
+            )
+        if save_config or force_claude_symlink:
+            raise GardeniaError(
+                "--save-config and --force-claude-symlink write tracked files and cannot be used with a "
+                f"stealth profile. To switch to a tracked profile, first remove {stealth_path}.",
+                exit_code=2,
+            )
 
     profile = merge_profile_overrides(
         cfg["profile"],
@@ -983,113 +1392,31 @@ def init_repo(
         agcoord=agcoord,
         docs_exemption=docs_exemption,
         claude_symlink=claude_symlink,
+        tools=tools,
     )
 
     block = render_managed_block(profile)
     agents_path = git_info.root / "AGENTS.md"
-    existing_agents = agents_path.read_text(encoding="utf-8") if agents_path.is_file() else None
-    updated_agents = apply_managed_block(existing_agents, block)
+    claude_path = git_info.root / "CLAUDE.md"
 
     actions: list[PlannedAction] = []
     warnings: list[str] = []
-
-    # 1. AGENTS.md managed block.
-    if existing_agents == updated_agents:
-        actions.append(
-            PlannedAction(
-                kind="skip",
-                component="agents-md",
-                description="AGENTS.md managed block is already up to date.",
-                path=str(agents_path),
-                status="skipped",
-            )
-        )
-    else:
-        desc = "Create AGENTS.md with gardenia managed block." if existing_agents is None else "Update gardenia managed block in AGENTS.md."
-        actions.append(
-            PlannedAction(
-                kind="write_file",
-                component="agents-md",
-                description=desc,
-                path=str(agents_path),
-            )
-        )
-
-    # 2. CLAUDE.md -> AGENTS.md symlink.
-    claude_path = git_info.root / "CLAUDE.md"
+    unresolved_tools: list[str] = []
+    updated_agents = ""
     create_symlink = False
     replace_symlink = False
-    if profile.claude_symlink:
-        if claude_path.is_symlink() and os.readlink(claude_path) == "AGENTS.md":
-            actions.append(
-                PlannedAction(
-                    kind="skip",
-                    component="claude-md",
-                    description="CLAUDE.md symlink to AGENTS.md is already in place.",
-                    path=str(claude_path),
-                    status="skipped",
-                )
-            )
-        elif not claude_path.exists() and not claude_path.is_symlink():
-            create_symlink = True
-            actions.append(
-                PlannedAction(
-                    kind="symlink",
-                    component="claude-md",
-                    description="Create symlink CLAUDE.md -> AGENTS.md.",
-                    path=str(claude_path),
-                )
-            )
-        elif force_claude_symlink:
-            create_symlink = True
-            replace_symlink = True
-            actions.append(
-                PlannedAction(
-                    kind="symlink",
-                    component="claude-md",
-                    description="Replace existing CLAUDE.md with symlink CLAUDE.md -> AGENTS.md.",
-                    path=str(claude_path),
-                )
-            )
-        else:
-            warning_msg = (
-                "Skipping CLAUDE.md symlink because a non-matching file or symlink already exists "
-                "(pass --force-claude-symlink to replace it)."
-            )
-            warnings.append(warning_msg)
-            actions.append(
-                PlannedAction(
-                    kind="skip",
-                    component="claude-md",
-                    description=warning_msg,
-                    path=str(claude_path),
-                    status="skipped",
-                )
-            )
-    else:
-        actions.append(
-            PlannedAction(
-                kind="skip",
-                component="claude-md",
-                description="CLAUDE.md symlink management disabled by profile.",
-                path=str(claude_path),
-                status="skipped",
-            )
-        )
-
-    # 3. Optional gardenia.toml persistence.
     gardenia_toml_path = git_info.root / "gardenia.toml"
     rendered_toml: str | None = None
-    if save_config:
-        rendered_toml = render_gardenia_toml(profile)
-        existing_toml = gardenia_toml_path.read_text(encoding="utf-8") if gardenia_toml_path.is_file() else None
-        if existing_toml == rendered_toml:
+
+    if stealth_active:
+        rendered_toml = render_gardenia_toml(profile, stealth=True)
+        if stealth_path.is_file() and profile == cfg["profile"]:
             actions.append(
                 PlannedAction(
                     kind="skip",
-                    component="gardenia-config",
-                    description="gardenia.toml is already up to date.",
-                    path=str(gardenia_toml_path),
+                    component="stealth-profile",
+                    description="Stealth profile is already up to date; tracked files are never modified.",
+                    path=str(stealth_path),
                     status="skipped",
                 )
             )
@@ -1097,11 +1424,63 @@ def init_repo(
             actions.append(
                 PlannedAction(
                     kind="write_file",
-                    component="gardenia-config",
-                    description="Write tracked repository profile to gardenia.toml.",
-                    path=str(gardenia_toml_path),
+                    component="stealth-profile",
+                    description="Write untracked stealth profile; tracked files are never modified.",
+                    path=str(stealth_path),
                 )
             )
+    else:
+        existing_agents = agents_path.read_text(encoding="utf-8") if agents_path.is_file() else None
+        updated_agents = apply_managed_block(existing_agents, block)
+        # 1. AGENTS.md managed block, then one sibling block per declared tool.
+        _plan_agents_md_action(
+            actions,
+            changed=existing_agents != updated_agents,
+            created=existing_agents is None,
+            path=agents_path,
+        )
+        if profile.tools:
+            updated_agents, unresolved_tools = _plan_sibling_blocks(
+                actions,
+                warnings,
+                updated_agents,
+                profile.tools,
+                path=agents_path,
+                env=effective_env,
+            )
+
+        # 2. CLAUDE.md -> AGENTS.md symlink.
+        create_symlink, replace_symlink = _plan_claude_symlink(
+            actions,
+            warnings,
+            claude_path,
+            enabled=profile.claude_symlink,
+            force=force_claude_symlink,
+        )
+
+        # 3. Optional gardenia.toml persistence.
+        if save_config:
+            rendered_toml = render_gardenia_toml(profile)
+            existing_toml = gardenia_toml_path.read_text(encoding="utf-8") if gardenia_toml_path.is_file() else None
+            if existing_toml == rendered_toml:
+                actions.append(
+                    PlannedAction(
+                        kind="skip",
+                        component="gardenia-config",
+                        description="gardenia.toml is already up to date.",
+                        path=str(gardenia_toml_path),
+                        status="skipped",
+                    )
+                )
+            else:
+                actions.append(
+                    PlannedAction(
+                        kind="write_file",
+                        component="gardenia-config",
+                        description="Write tracked repository profile to gardenia.toml.",
+                        path=str(gardenia_toml_path),
+                    )
+                )
 
     # 4. Optional host repository registry update.
     from gardenia.repos import effective_repos_config_path, load_repos_registry, save_repos_registry
@@ -1157,8 +1536,12 @@ def init_repo(
         for action in actions:
             if action.kind == "skip":
                 continue
-            if action.component == "agents-md" and action.kind == "write_file":
+            if action.component.split(":", 1)[0] == "agents-md" and action.kind == "write_file":
                 agents_path.write_text(updated_agents, encoding="utf-8")
+                action.status = "executed"
+            elif action.component == "stealth-profile" and rendered_toml is not None:
+                stealth_path.parent.mkdir(parents=True, exist_ok=True)
+                stealth_path.write_text(rendered_toml, encoding="utf-8")
                 action.status = "executed"
             elif action.component == "claude-md" and action.kind == "symlink" and create_symlink:
                 if replace_symlink and (claude_path.exists() or claude_path.is_symlink()):
@@ -1184,6 +1567,8 @@ def init_repo(
         "is_linked_worktree": git_info.is_linked_worktree,
         "profile": profile.to_dict(),
         "managed_block": block,
+        "stealth": stealth_active,
+        "unresolved_tools": unresolved_tools,
         "warnings": warnings,
         "actions": [action.to_dict() for action in actions],
     }

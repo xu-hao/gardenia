@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 import sys
 from typing import Any, Sequence
 
 from gardenia import __version__
-from gardenia.host import check_host, parse_clients_arg, setup_host
+from gardenia.host import HostInventory, check_host, parse_clients_arg, setup_host, verify_repo_tools
 from gardenia.models import CHECK_FORMAT, Finding, GardeniaError, compute_ok
 from gardenia.repo import check_repo, init_repo, render_repo, try_resolve_git_repo
 from gardenia.repos import (
@@ -91,6 +92,13 @@ def _add_profile_flags(parser: argparse.ArgumentParser) -> None:
         action="store_false",
         default=None,
         help="Do not create or require CLAUDE.md -> AGENTS.md symlink.",
+    )
+    parser.add_argument(
+        "--tool",
+        dest="tools",
+        action="append",
+        default=None,
+        help="Declare a host-configured tool with its own AGENTS.md block (repeatable; replaces the profile list).",
     )
 
 
@@ -212,6 +220,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Replace an existing non-matching CLAUDE.md with a symlink to AGENTS.md.",
+    )
+    repo_init.add_argument(
+        "--stealth",
+        action="store_true",
+        default=False,
+        help="Store an untracked profile under <git-common-dir>/gardenia/ without modifying tracked files.",
     )
     repo_init.add_argument(
         "--save-config",
@@ -391,6 +405,12 @@ def _format_host_human(host: dict[str, Any]) -> list[str]:
             lines.append(f"  Client {client}: {', '.join(parts) if parts else 'error'}")
     else:
         lines.append("  Clients: none detected")
+    if host["config"]["exists"]:
+        config = host["config"]
+        lines.append(
+            f"  Host gardenia config: {config['path']} "
+            f"(tools: {', '.join(config['user_tools']) or 'none'}; plugins: {', '.join(config['user_plugins']) or 'none'})"
+        )
     cfg = host["agroute_config"]
     if not cfg["exists"]:
         lines.append(f"  Host agroute config: not present ({cfg['path']})")
@@ -407,11 +427,15 @@ def _format_repo_human(repo: dict[str, Any]) -> list[str]:
     local = repo["local_state"]
     lines = [f"Repository ({tracked['root']}):"]
     wt_label = "linked worktree" if tracked["is_linked_worktree"] else "primary checkout"
+    if tracked["stealth"]:
+        wt_label += ", stealth profile"
     lines.append(f"  Tracked settings ({wt_label}):")
     cfg = tracked["config"]
     lines.append(f"    config: {cfg['source']} ({'valid' if cfg['valid'] else 'invalid'})")
     amd = tracked["agents_md"]
-    if not amd["exists"]:
+    if tracked["stealth"]:
+        amd_status = "not managed (stealth)"
+    elif not amd["exists"]:
         amd_status = "missing"
     elif amd["block_malformed"]:
         amd_status = "malformed markers"
@@ -422,6 +446,14 @@ def _format_repo_human(repo: dict[str, Any]) -> list[str]:
     else:
         amd_status = "out of sync"
     lines.append(f"    AGENTS.md: {amd_status}")
+    for name, state in tracked["sibling_blocks"].items():
+        if tracked["stealth"]:
+            block_status = "not managed (stealth)"
+        elif state["malformed"]:
+            block_status = "malformed markers"
+        else:
+            block_status = "present" if state["present"] else "missing"
+        lines.append(f"    AGENTS.md {name} block: {block_status}")
     lines.append(f"    CLAUDE.md: {tracked['claude_md']['status']}")
     lines.append(f"  Local per-clone .git/ state ({local['git_common_dir']}):")
     hh = local["howhard_store"]
@@ -554,15 +586,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             all_findings: list[Finding] = list(host_res["_findings"])
             repo_payload: dict[str, Any] | None = None
-            if args.repo is not None:
+            if args.repo is not None or try_resolve_git_repo(None) is not None:
                 repo_res = check_repo(args.repo, strict=args.strict)
                 repo_payload = repo_res["repo"]
                 all_findings.extend(repo_res["_findings"])
-            else:
-                if try_resolve_git_repo(None) is not None:
-                    repo_res = check_repo(None, strict=args.strict)
-                    repo_payload = repo_res["repo"]
-                    all_findings.extend(repo_res["_findings"])
+                config = repo_payload["tracked"]["config"]
+                if config["valid"] and config["values"]["tools"]:
+                    tool_findings = verify_repo_tools(
+                        config["values"]["tools"],
+                        HostInventory(),
+                        repo_root=Path(repo_payload["tracked"]["root"]),
+                        stealth=repo_payload["tracked"]["stealth"],
+                        clients=clients,
+                        with_agcoord=args.with_agcoord,
+                    )
+                    all_findings.extend(f for f in tool_findings if f not in all_findings)
 
             ok = compute_ok(all_findings, strict=args.strict)
             payload = {
@@ -651,6 +689,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     agcoord=args.agcoord,
                     docs_exemption=args.docs_exemption,
                     claude_symlink=args.claude_symlink,
+                    tools=args.tools,
                 )
                 if want_json:
                     _emit_json(res)
@@ -670,6 +709,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     agcoord=args.agcoord,
                     docs_exemption=args.docs_exemption,
                     claude_symlink=args.claude_symlink,
+                    tools=args.tools,
+                    stealth=args.stealth,
                     force_claude_symlink=args.force_claude_symlink,
                     save_config=args.save_config,
                     allow_worktree=args.allow_worktree,
