@@ -121,9 +121,10 @@ synchronizes, and audits the environment around that loop:
   installed and version-aligned.
 - **Repository (`gardenia repo`)** — `gardenia repo init` and `gardenia repo check`
   render and verify the delimited `<!-- gardenia:begin --> ... <!-- gardenia:end -->`
-  contract inside `AGENTS.md` (encoding the exact routing mode, gate command, integer byte
-  `agc` resource claims, and documentation-only exemption from `gardenia.toml` or
-  `[tool.gardenia]`), maintain `CLAUDE.md -> AGENTS.md`, and inspect
+  contract inside `AGENTS.md` (encoding the gate command, integer byte `agc` resource
+  claims, and documentation-only exemption from `gardenia.toml` or `[tool.gardenia]`),
+  stamp one sibling block per active plugin from its `AGENTS.snippet.md` (`agrein`, the
+  `routing` plugin, and `agcoord`), maintain `CLAUDE.md -> AGENTS.md`, and inspect
   `<git-common-dir>/{howhard,agroute}/` read-only.
 - **Workstation fleet (`gardenia repos` & `gardenia check`)** — `gardenia check` reports
   host and repository findings together with `"scope": "host"` or `"scope": "repo"`, while

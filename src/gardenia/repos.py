@@ -15,7 +15,13 @@ import tomllib
 from typing import Any, Mapping, Sequence
 
 from gardenia import __version__
-from gardenia.host import BROKER_PROBE_TIMEOUT_SECONDS, HostInventory, load_host_config, verify_repo_tools
+from gardenia.host import (
+    BROKER_PROBE_TIMEOUT_SECONDS,
+    HostInventory,
+    load_host_config,
+    verify_builtin_blocks,
+    verify_repo_tools,
+)
 from gardenia.models import (
     DEFAULT_TIMEOUT_SECONDS,
     DEFAULT_TMPFS_INODES,
@@ -38,6 +44,7 @@ from gardenia.repo import (
     load_repo_config,
     render_managed_block,
     resolve_git_repo,
+    sibling_block_names,
     stealth_profile_path,
     try_resolve_git_repo,
 )
@@ -699,28 +706,37 @@ def check_repos(
 
         ok = res["ok"]
         findings = res["findings"]
-        tools = res["repo"]["tracked"]["config"]["values"]["tools"]
-        if res["repo"]["tracked"]["config"]["valid"] and tools:
-            # Only repositories that declare tools require host inspection.
+        tracked = res["repo"]["tracked"]
+        tools = tracked["config"]["values"]["tools"]
+        builtin = [name for name in tracked["sibling_blocks"] if name not in tools]
+        if tracked["config"]["valid"] and (tools or (builtin and not tracked["stealth"])):
+            repo_root = Path(tracked["root"])
             try:
                 if inventory is None:
                     inventory = HostInventory(effective_env)
-                tool_findings = verify_repo_tools(
-                    tools,
-                    inventory,
-                    repo_root=Path(res["repo"]["tracked"]["root"]),
-                    stealth=res["repo"]["tracked"]["stealth"],
+                tool_findings = (
+                    verify_repo_tools(tools, inventory, repo_root=repo_root, stealth=tracked["stealth"])
+                    if tools
+                    else []
+                )
+                tool_findings += verify_builtin_blocks(
+                    builtin, inventory, repo_root=repo_root, stealth=tracked["stealth"]
                 )
             except GardeniaError as exc:
-                tool_findings = [
-                    Finding(
-                        scope="host",
-                        severity="error",
-                        component="host-config",
-                        message=exc.message,
-                        remediation="Fix the host gardenia configuration",
-                    )
-                ]
+                # Built-in drift needs host state, but only declared tools require it.
+                tool_findings = (
+                    [
+                        Finding(
+                            scope="host",
+                            severity="error",
+                            component="host-config",
+                            message=exc.message,
+                            remediation="Fix the host gardenia configuration",
+                        )
+                    ]
+                    if tools
+                    else []
+                )
             ok = ok and compute_ok(tool_findings, strict=strict)
             findings = [*findings, *(f.to_dict() for f in tool_findings)]
         counts = {
@@ -1508,7 +1524,7 @@ def _plan_single_repo_upgrade(
     if sync_policy:
         steps.append("sync_policy")
         if not cfg["stealth"]:
-            steps.extend(f"sync_sibling_block:{name}" for name in profile.tools)
+            steps.extend(f"sync_sibling_block:{name}" for name in sibling_block_names(profile))
     if upgrade_locks:
         if (git_info.root / "uv.lock").is_file():
             steps.append("upgrade_uv_lock")

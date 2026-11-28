@@ -91,8 +91,11 @@ gardenia repo init \
 What `gardenia repo init` does:
 
 1. Inserts or updates **only** the delimited
-   `<!-- gardenia:begin --> ... <!-- gardenia:end -->` region in `AGENTS.md`, leaving
-   every project-specific line before and after those markers completely untouched.
+   `<!-- gardenia:begin --> ... <!-- gardenia:end -->` region in `AGENTS.md` and, right
+   after it, one `<!-- <plugin>:begin --> ... <!-- <plugin>:end -->` block per active
+   plugin (`agrein`, `agroute`, and `agcoord` for this profile) copied from that plugin's
+   installed `AGENTS.snippet.md`, leaving every project-specific line outside those markers
+   completely untouched.
 2. Creates a relative `CLAUDE.md -> AGENTS.md` symlink (skipping with a warning if
    `CLAUDE.md` is already a non-matching regular file unless `--force-claude-symlink` is
    passed).

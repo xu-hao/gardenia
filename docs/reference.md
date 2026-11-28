@@ -70,8 +70,9 @@ same, except that GitHub `owner/repo` becomes `https://github.com/<owner>/<repo>
 
 ### `AGENTS.snippet.md` resolution
 
-For a repository tool, `gardenia` reads `<plugin_root>/AGENTS.snippet.md` from the
-configured plugin of the same name. It never runs the tool's own binary.
+For a repository tool or an active built-in plugin, `gardenia` reads
+`<plugin_root>/AGENTS.snippet.md` from the configured plugin of the same name. It never
+runs the tool's own binary.
 
 | Client | Installed plugin root |
 | --- | --- |
@@ -81,7 +82,36 @@ configured plugin of the same name. It never runs the tool's own binary.
 
 Among installed copies that ship the file, the highest version wins; ties follow the order
 `codex`, `claude`, `agy`. When none provides it, a plugin whose `source` is a local
-directory is read from that directory.
+directory is read from that directory. When neither exists, a built-in plugin (`agrein`,
+`agroute`, `howhard`, `agcoord`) falls back to the verbatim copy of its snippet shipped
+inside `gardenia`, so an offline host stamps the same block every time. A snippet file
+that exists but is invalid is reported instead of replaced by the fallback.
+
+### Managed `AGENTS.md` blocks
+
+`gardenia` owns one `<!-- gardenia:begin --> ... <!-- gardenia:end -->` block plus one
+sibling `<!-- <name>:begin --> ... <!-- <name>:end -->` block per active plugin or tool:
+
+| Block | Present when | Content |
+| --- | --- | --- |
+| `gardenia` | always (outside stealth mode) | Rendered from the repository profile alone: issue and `/var/tmp` worktree rules, behavioral testing, the documentation-only exemption (`docs_exemption`), the gate command with integer byte `agc` claims (`gate`, `cpu`, `memory_gb`, `tmpfs_gb`, `no_overflow`, `agcoord`), hermetic tests, and approval rules. |
+| `agrein` | always | The plugin's `AGENTS.snippet.md`. |
+| `agroute` | `routing = "agroute"` | The plugin's `AGENTS.snippet.md`. |
+| `howhard` | `routing = "howhard"` | The plugin's `AGENTS.snippet.md`. |
+| `agcoord` | `agcoord = "auto"` or `"required"` | The plugin's `AGENTS.snippet.md`. |
+| `<tool>` | listed in `tools` | The tool plugin's `AGENTS.snippet.md` (no built-in fallback). |
+
+Listing a built-in name in `tools` keeps its block regardless of `routing` or `agcoord`
+(for example `tools = ["howhard"]` alongside `routing = "agroute"`). Tool usage, CLI flags,
+and step-by-step procedures stay in each plugin's installed skills; the `gardenia` block
+only names the repository's concrete parameters. For the default profile, its gate rule
+renders as:
+
+```markdown
+- Gate through `agc run` / `agc land <pr>` where `agc` is available, passing
+  `--no-overflow --resource cpu=4 --resource memory=4294967296 -- bash scripts/check`; elsewhere,
+  run `bash scripts/check` and merge via the forge after it passes.
+```
 
 ## `gardenia host check`
 
@@ -174,12 +204,20 @@ state. Exits `2` if the target directory is not inside a Git repository.
 gardenia repo check [--repo PATH] [--strict] [--json]
 ```
 
-For each name in the profile's `tools`, a missing or malformed
-`<!-- <tool>:begin --> ... <!-- <tool>:end -->` block is an `error` with component
-`agents-md:<tool>`. A block is malformed when its markers are unpaired, repeated, or out of
-order, when it is empty, when it contains another block marker, or when it sits inside the
-`gardenia` block. Block content is not compared, and no host configuration or plugin
-directory is read.
+Each expected [sibling block](#managed-agentsmd-blocks) is checked from repository files
+alone, with component `agents-md:<name>`:
+
+- A malformed block is an `error`. A block is malformed when its markers are unpaired,
+  repeated, or out of order, when it is empty, when it contains another block marker, or
+  when it sits inside the `gardenia` block.
+- A missing block for a name in `tools` is an `error`, because only a host with the plugin
+  can stamp it.
+- A missing block for an active built-in plugin is a `warning`, because `repo init` can
+  always stamp it offline.
+- A leftover block for a built-in plugin that the profile no longer activates is a
+  `warning`.
+
+Block content is not compared, and no host configuration or plugin directory is read.
 
 Under a [stealth profile](host-vs-repo.md#external-or-shared-repositories-stealth-profiles),
 `config.source` is `stealth`, `agents_md.in_sync` is `null`, and tracked blocks and the
@@ -188,7 +226,7 @@ raise a warning.
 
 Reports:
 
-- `repo.tracked`: `stealth`, `sibling_blocks` (`present` and `malformed` per tool), `root`, `is_linked_worktree`, `config` (`gardenia.toml`, `[tool.gardenia]`,
+- `repo.tracked`: `stealth`, `sibling_blocks` (`present` and `malformed` per expected block), `root`, `is_linked_worktree`, `config` (`gardenia.toml`, `[tool.gardenia]`,
   or `defaults`), `agents_md` (presence, managed block markers, drift vs. rendered block,
   referenced layers), `claude_md` (`symlink_to_agents`, `symlink_other`, `regular_file`,
   `missing`), and optional `howhard.toml` / `agroute.toml` TOML validity.
@@ -214,8 +252,8 @@ Shared profile options:
 | `--memory-gb FLOAT` | `4.0` | Memory claim in GiB (rendered as exact integer bytes for `agc --resource memory=<bytes>`). |
 | `--tmpfs-gb FLOAT` | unset | Optional tmpfs claim in GiB (rendered as exact integer bytes alongside `--resource tmpfs_inodes=262144` when set). |
 | `--no-overflow` / `--allow-overflow` | `--no-overflow` | Include or omit `--no-overflow` in `agc` commands. |
-| `--routing MODE` | `agroute` | `agroute` (full 5-step `agr` + `howhard` delegation), `howhard` (native `howhard` only), or `none`. |
-| `--agcoord MODE` | `auto` | `auto` (use `agc` on Linux, direct gate elsewhere), `required`, or `none`. |
+| `--routing MODE` | `agroute` | `agroute` (stamp the `agroute` block), `howhard` (stamp the `howhard` block), or `none` (neither). |
+| `--agcoord MODE` | `auto` | `auto` (gate through `agc` where available, directly elsewhere), `required` (always through `agc`), or `none` (direct gate). `auto` and `required` also stamp the `agcoord` block. |
 | `--docs-exemption` / `--no-docs-exemption` | enabled | Include or omit the documentation-only exemption clause (aliases: `--docs-only-exemption` / `--no-docs-only-exemption`). |
 | `--claude-symlink` / `--no-claude-symlink` | enabled | Manage `CLAUDE.md -> AGENTS.md`. |
 | `--tool NAME` | profile `tools` | Declare a tool with its own `AGENTS.md` block. Repeatable; when passed, replaces the profile's list. Add `--save-config` or `--stealth` to persist it. |
@@ -232,12 +270,20 @@ Additional `gardenia repo init` options:
 | `--dry-run` | Plan edits without writing files. |
 | `--json` | Emit structured JSON output. |
 
-`repo init` stamps or refreshes one sibling block per declared tool from the resolved
-[`AGENTS.snippet.md`](#agentssnippetmd-resolution), appending new blocks at the end of
-`AGENTS.md`. It reads host state only when the profile declares `tools`. If a snippet cannot
-be resolved or is invalid, the command still succeeds, leaves that block untouched, adds a
-`warnings` entry, and lists the tool in `unresolved_tools`. Malformed sibling markers fail
-with exit `2` before anything is written. `repo render` prints only the `gardenia` block.
+`repo init` stamps or refreshes every expected [sibling block](#managed-agentsmd-blocks)
+from the resolved [`AGENTS.snippet.md`](#agentssnippetmd-resolution), reading the host's
+installed plugin roots to do so. An existing block is replaced in place; a new block is
+inserted right after the preceding managed block (the `gardenia` block, then each sibling
+in table order), so everything outside the managed blocks keeps its position. It removes
+the block of a built-in plugin the profile no longer activates, but never removes a block
+for a name dropped from `tools`. If a snippet cannot be resolved or is invalid, the command
+still succeeds, leaves that block untouched, adds a `warnings` entry, and lists the name in
+`unresolved_tools`. Malformed markers for any of these blocks, or an invalid host
+`config.toml`, fail with exit `2` before anything is written. The JSON result lists the
+expected `sibling_blocks`.
+
+`repo render` prints only the `gardenia` block and never reads host state; its JSON output
+adds the expected `sibling_blocks` names.
 
 ## `gardenia repos`
 
@@ -294,9 +340,11 @@ gardenia repos check [--root PATH] [--repo PATH ...] [--max-depth INT] [--strict
 For repositories whose profile declares `tools`, `repos check` also verifies that each tool
 is configured on this host, that its CLI meets `min_version`, and that its plugin is
 installed and enabled for the detected clients (`"scope": "host"`). Outside stealth mode, it
-warns with component `agents-md:<tool>` when a block differs from the installed snippet, and
-errors when an installed plugin provides no usable snippet. An invalid host `config.toml`
-becomes a `host-config` error on those repositories only.
+warns with component `agents-md:<name>` when a declared tool's or active built-in plugin's
+block differs from the snippet `repo init` would stamp on this host (the installed copy, or
+the built-in fallback), and errors when an installed snippet file is unusable. An invalid
+host `config.toml` becomes a `host-config` error on repositories that declare `tools` only;
+built-in block comparison is then skipped.
 
 Emits `gardenia-repos-check-v1` JSON and exits `0` when all repositories pass or `1`
 when any repository fails.
@@ -340,9 +388,9 @@ gardenia repos upgrade \
 
 Sibling blocks and `--package`:
 
-- `--sync-policy` refreshes every declared tool's sibling block along with the `gardenia`
-  block, including when `--package <name>` is passed. Dry runs list
-  `sync_sibling_block:<tool>` steps.
+- `--sync-policy` refreshes every expected sibling block (active built-in plugins and
+  declared tools) along with the `gardenia` block, including when `--package <name>` is
+  passed. Dry runs list `sync_sibling_block:<name>` steps.
 - An unresolved snippet leaves the committed block in place and records
   `skip_sibling_block:<tool>:unresolved`. If `--package` names that tool exactly, the
   repository ends in `error` instead.
@@ -400,8 +448,8 @@ or when `--repo PATH` is provided.
 gardenia check [--repo PATH] [--clients codex,claude,agy] [--with-agcoord] [--strict] [--json]
 ```
 
-When the repository profile declares `tools`, `gardenia check` applies the same
-per-tool host and snippet sync verification as `repos check`, reporting each finding once.
+`gardenia check` applies the same per-tool host verification and sibling block comparison
+as `repos check`, reporting each finding once.
 
 ## Tracked configuration schema (`gardenia.toml` / `[tool.gardenia]`)
 
@@ -416,8 +464,8 @@ cpu = 4
 memory_gb = 4
 # tmpfs_gb = 2
 no_overflow = true
-routing = "agroute"      # "agroute" | "howhard" | "none"
-agcoord = "auto"         # "auto" | "required" | "none"
+routing = "agroute"      # "agroute" | "howhard" | "none"; selects the agroute or howhard block
+agcoord = "auto"         # "auto" | "required" | "none"; "auto"/"required" add the agcoord block
 docs_exemption = true
 claude_symlink = true
 # tools = ["hotgate"]    # sibling AGENTS.md blocks; unique names, never "gardenia"

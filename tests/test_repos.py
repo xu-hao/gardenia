@@ -498,6 +498,11 @@ def test_repos_upgrade_validation_dry_run_and_up_to_date_keeps_primary_untouched
     assert dry_data["format"] == "gardenia-repos-upgrade-v1"
     assert dry_data["dry_run"] is True
     assert dry_data["repos"][0]["status"] == "planned"
+    steps = dry_data["repos"][0]["planned_steps"]
+    assert [step for step in steps if step.startswith("sync_sibling_block:")] == [
+        "sync_sibling_block:agrein",
+        "sync_sibling_block:agroute",
+    ]
     assert not wt_root.exists()
 
     # Real run on up-to-date local repo (no origin remote) succeeds and cleans up completely.

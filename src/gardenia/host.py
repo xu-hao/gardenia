@@ -35,6 +35,7 @@ from gardenia.models import (
     version_lt,
 )
 from gardenia.repo import extract_sibling_block, normalize_snippet, render_sibling_block
+from gardenia.snippets import BUILTIN_SNIPPETS
 
 SETUP_COMMAND_TIMEOUT_SECONDS = 300.0
 BROKER_PROBE_TIMEOUT_SECONDS = 30.0
@@ -1741,7 +1742,8 @@ class HostInventory:
         """Locate ``<plugin_root>/AGENTS.snippet.md`` for a configured plugin.
 
         Installed plugin roots win (highest version, then ``codex``, ``claude``, ``agy``);
-        a local-directory plugin source is the fallback.
+        a local-directory plugin source comes next. A built-in plugin with neither falls back
+        to the copy shipped with ``gardenia`` (``origin == "builtin"``).
         """
 
         plugin = self.config.plugin(name)
@@ -1777,6 +1779,13 @@ class HostInventory:
             if local.is_file():
                 origin, path = "local-source", local
 
+        if path is None and name in BUILTIN_SNIPPETS:
+            return SnippetResolution(
+                name=name,
+                body=normalize_snippet(name, BUILTIN_SNIPPETS[name]),
+                origin="builtin",
+                installed=installed,
+            )
         if path is None:
             reason = (
                 f"installed plugin '{name}' ships no {PLUGIN_SNIPPET_FILENAME}"
@@ -1802,6 +1811,61 @@ def resolve_tool_snippets(
 
     inventory = HostInventory(env)
     return {name: inventory.resolve_snippet(name) for name in names}
+
+
+def _sibling_drift_findings(name: str, inventory: HostInventory, agents_text: str) -> list[Finding]:
+    """Compare one committed sibling block with the snippet ``repo init`` would stamp here."""
+
+    resolution = inventory.resolve_snippet(name)
+    if resolution.body is None:
+        # A missing installation is reported by the host readiness checks instead.
+        if not (resolution.installed or resolution.path is not None):
+            return []
+        return [
+            Finding(
+                scope="host",
+                severity="error",
+                component=name,
+                message=f"Could not verify the '{name}' AGENTS.md block: {resolution.error}.",
+                remediation=f"Reinstall or upgrade plugin '{name}' so it ships {PLUGIN_SNIPPET_FILENAME}",
+            )
+        ]
+    block, _ = extract_sibling_block(agents_text, name)
+    if block is None or block == render_sibling_block(name, resolution.body):
+        return []
+    source = "built-in gardenia copy" if resolution.origin == "builtin" else "installed"
+    return [
+        Finding(
+            scope="repo",
+            severity="warning",
+            component=f"agents-md:{name}",
+            message=f"AGENTS.md '{name}' block has drifted from the {source} {PLUGIN_SNIPPET_FILENAME}.",
+            remediation="gardenia repo init",
+        )
+    ]
+
+
+def verify_builtin_blocks(
+    names: list[str] | tuple[str, ...],
+    inventory: HostInventory,
+    *,
+    repo_root: Path,
+    stealth: bool = False,
+) -> list[Finding]:
+    """Detect drift of active built-in sibling blocks against this host's resolved snippets.
+
+    Host readiness of the built-in stack is ``check_host``'s concern, so only block content
+    is compared here; stealth repositories keep no tracked block to compare.
+    """
+
+    if stealth or not names:
+        return []
+    agents_path = repo_root / "AGENTS.md"
+    agents_text = agents_path.read_text(encoding="utf-8") if agents_path.is_file() else ""
+    findings: list[Finding] = []
+    for name in names:
+        findings.extend(f for f in _sibling_drift_findings(name, inventory, agents_text) if f not in findings)
+    return findings
 
 
 def verify_repo_tools(
@@ -1892,33 +1956,8 @@ def verify_repo_tools(
                 versions = {spec.name: cli_version} if spec is not None else {}
                 _evaluate_client_plugins(client, plugins, versions, findings, (plugin,))
 
-        if stealth:
-            continue
-        resolution = inventory.resolve_snippet(name)
-        if resolution.body is None:
-            # A missing installation is already reported per client above.
-            if resolution.installed or resolution.path is not None:
-                findings.append(
-                    Finding(
-                        scope="host",
-                        severity="error",
-                        component=name,
-                        message=f"Could not verify the '{name}' AGENTS.md block: {resolution.error}.",
-                        remediation=f"Reinstall or upgrade plugin '{name}' so it ships {PLUGIN_SNIPPET_FILENAME}",
-                    )
-                )
-            continue
-        block, _ = extract_sibling_block(agents_text, name)
-        if block is not None and block != render_sibling_block(name, resolution.body):
-            findings.append(
-                Finding(
-                    scope="repo",
-                    severity="warning",
-                    component=f"agents-md:{name}",
-                    message=f"AGENTS.md '{name}' block has drifted from the installed {PLUGIN_SNIPPET_FILENAME}.",
-                    remediation="gardenia repo init",
-                )
-            )
+        if not stealth:
+            findings.extend(_sibling_drift_findings(name, inventory, agents_text))
 
     unique: list[Finding] = []
     for finding in findings:

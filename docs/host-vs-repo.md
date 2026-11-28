@@ -23,13 +23,13 @@ modules:
 | User-scoped Antigravity plugins | **Per-Host** | `~/.gemini/config/plugins/` | `gardenia host setup --clients agy` / `host check` | All Antigravity sessions |
 | Subscription plans, quota cutoffs & credit reserves | **Per-Host** | `${XDG_CONFIG_HOME:-~/.config}/agroute/config.toml` | `gardenia host setup --reserve-*` / `host check` | All repos for OS user |
 | User-configured tools & plugins | **Per-Host** | `${XDG_CONFIG_HOME:-~/.config}/gardenia/config.toml` (or `GARDENIA_HOST_CONFIG`) | Read by `gardenia host`, `gardenia check`, `gardenia repos check`, and, for repos declaring `tools`, `repo init` / `repos upgrade` | All repos for OS user |
-| Installed plugin `AGENTS.snippet.md` files | **Per-Host** | Each client's installed plugin root, or a local-directory plugin source | Read as above, never by `repo check` / `repo render` | All repos declaring the tool |
+| Installed plugin `AGENTS.snippet.md` files | **Per-Host** | Each client's installed plugin root, or a local-directory plugin source (built-in plugins fall back to a copy inside `gardenia`) | Read by `repo init`, `repos upgrade`, `gardenia check`, and `repos check`; never by `repo check` / `repo render` | All repos using the plugin or tool |
 | Managed repository registry | **Per-Host** | `${XDG_CONFIG_HOME:-~/.config}/gardenia/repos.toml` (or `GARDENIA_REPOS_CONFIG`) | `gardenia repos` (`list`, `add`, `remove`, `scan`, `prune`) and primary `repo init` | All fleet sweeps for OS user |
 | Upgrade sweep failure logs | **Per-Host** | `${XDG_STATE_HOME:-~/.local/state}/gardenia/logs/` (or `GARDENIA_LOG_DIR`) | `gardenia repos upgrade` | Local diagnostics only |
 | Contributor guardrails (managed block + project rules) | **Per-Repo Tracked** | `<repo>/AGENTS.md` | `gardenia repo init` / `repo render` / `repo check` | All contributors via Git |
 | Claude Code root instruction symlink | **Per-Repo Tracked** | `<repo>/CLAUDE.md -> AGENTS.md` | `gardenia repo init` / `repo check` | All contributors via Git |
 | Gardenia repository profile | **Per-Repo Tracked** | `<repo>/gardenia.toml` (or `[tool.gardenia]` in `pyproject.toml`) | `gardenia repo init --save-config` / `repo check` | All contributors via Git |
-| Per-tool sibling blocks (`<!-- <tool>:begin -->`) | **Per-Repo Tracked** | `<repo>/AGENTS.md` | Stamped by `repo init` / `repos upgrade`; presence and integrity checked by `repo check` | All contributors via Git |
+| Per-plugin sibling blocks (`<!-- <name>:begin -->`) for active built-ins and declared `tools` | **Per-Repo Tracked** | `<repo>/AGENTS.md` | Stamped by `repo init` / `repos upgrade`; presence and integrity checked by `repo check` | All contributors via Git |
 | Stealth repository profile (`repo init --stealth`) | **Per-Repo Local `.git/`** | `<git-common-dir>/gardenia/gardenia.toml` | `gardenia repo init` / `repo check` | Primary checkout + all linked worktrees of one clone |
 | Optional project `howhard` policy/inventories | **Per-Repo Tracked** | `<repo>/howhard.toml` | Validated by `gardenia repo check` | All contributors via Git |
 | Optional project `agroute` overrides | **Per-Repo Tracked** | `<repo>/agroute.toml` | Validated by `gardenia repo check` | All contributors via Git |
@@ -111,12 +111,19 @@ leaving all other content in `AGENTS.md` alone:
 
 Removing a name from `tools` does not delete its block; delete it by hand.
 
+The built-in plugins use the same mechanism without any `tools` entry: `agrein` always,
+`agroute` or `howhard` according to `routing`, and `agcoord` unless `agcoord = "none"`.
+Their blocks sit right after the `gardenia` block, come from each installed plugin's
+`AGENTS.snippet.md` (or the copy shipped inside `gardenia` when no installed plugin provides
+one), and are removed by `repo init` when a profile change deactivates them. See
+[Managed `AGENTS.md` blocks](reference.md#managed-agentsmd-blocks).
+
 ### What each check reads
 
 | Command | `gardenia` managed block | Sibling blocks | Host installation |
 | --- | --- | --- | --- |
 | `gardenia repo check` | Exact match against the profile | Present, well formed, non-overlapping | Never read |
-| `gardenia check`, `gardenia repos check` | Same | Same, plus content compared with the installed snippet | Verified for the declared tools |
+| `gardenia check`, `gardenia repos check` | Same | Same, plus content compared with the snippet `repo init` would stamp on this host | Verified for the declared tools |
 
 `repo render` and `repo check` never read the host `config.toml` or any plugin directory, so
 CI and machines without a private plugin still pass `repo check`.

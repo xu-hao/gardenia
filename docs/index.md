@@ -210,8 +210,9 @@ commits.
     Codex, Claude Code, and Antigravity, and writes host quota reserves in
     `~/.config/agroute/config.toml`.
   - `gardenia repo` (`init`, `render`, `check`) — updates **only** the delimited
-    `<!-- gardenia:begin --> ... <!-- gardenia:end -->` guardrail block inside
-    `AGENTS.md` (preserving all project-specific rules outside those markers), manages
+    `<!-- gardenia:begin --> ... <!-- gardenia:end -->` guardrail block and the sibling
+    blocks stamped from each active plugin's `AGENTS.snippet.md` inside `AGENTS.md`
+    (preserving all project-specific rules outside those markers), manages
     `CLAUDE.md -> AGENTS.md` and `gardenia.toml`, and checks per-clone `.git/` stores
     read-only.
   - `gardenia repos` (`scan`, `list`, `add`, `remove`, `prune`, `check`, `upgrade`) —
