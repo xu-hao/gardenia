@@ -1361,3 +1361,308 @@ def test_repos_upgrade_agc_includes_tmpfs_inodes_when_tmpfs_gb_set(tmp_path: Pat
         assert "tmpfs=2147483648" in argv
         assert "tmpfs_inodes=262144" in argv
     assert list(wt_root.iterdir()) == []
+
+
+def _install_venv_uv_shim(bin_dir: Path, log_path: Path, *, install_debris: bool = False) -> None:
+    """Fake uv: seeded venvs expose ``venv-tool``; ``uv lock`` mutates ``uv.lock``."""
+
+    debris = (
+        "pathlib.Path('demo.egg-info').mkdir(exist_ok=True); "
+        "pathlib.Path('demo.egg-info/PKG-INFO').write_text('Name: demo\\\\n'); "
+        "open('README.md', 'a').write('install touched\\\\n')"
+        if install_debris
+        else "pass"
+    )
+    make_python_shim(
+        bin_dir,
+        "uv",
+        f"""
+        import pathlib, stat, sys
+        if sys.argv[1:3] == ["venv", "--seed"]:
+            vbin = pathlib.Path(sys.argv[3]) / "bin"
+            vbin.mkdir(parents=True, exist_ok=True)
+            marker = vbin / "venv-tool"
+            marker.write_text("#!/usr/bin/env bash\\necho venv-active\\n", encoding="utf-8")
+            marker.chmod(marker.stat().st_mode | stat.S_IXUSR)
+            (vbin / "python").symlink_to(sys.executable)
+            sys.exit(0)
+        if sys.argv[1:3] == ["pip", "install"]:
+            {debris}
+            sys.exit(0)
+        if sys.argv[1:2] == ["lock"]:
+            with open("uv.lock", "a", encoding="utf-8") as fh:
+                fh.write("# upgraded\\n")
+            sys.exit(0)
+        sys.exit(2)
+        """,
+        log_path=log_path,
+    )
+
+
+def _run_upgrade(
+    tmp_path: Path,
+    env: dict[str, str],
+    repos: list[Path],
+    *flags: str,
+    expect_exit: int = 0,
+) -> dict[str, dict]:
+    args = ["repos", "upgrade"]
+    for repo in repos:
+        args.extend(["--repo", str(repo)])
+    args.extend([*flags, "--worktree-root", str(tmp_path / "wt-root"), "--json"])
+    proc = run_cli(args, cwd=tmp_path, env=env)
+    assert proc.returncode == expect_exit, proc.stdout + proc.stderr
+    return {r["name"]: r for r in json.loads(proc.stdout)["repos"]}
+
+
+def _assert_no_upgrade_leftovers(tmp_path: Path, env: dict[str, str], repos: list[Path]) -> None:
+    assert list((tmp_path / "wt-root").iterdir()) == []
+    for repo in repos:
+        assert "gardenia-upgrade-" not in _git(repo, env, "branch")
+        assert _git(repo, env, "worktree", "list", "--porcelain").count("worktree ") == 1
+        assert _git(repo, env, "status", "--porcelain") == ""
+
+
+def test_repos_upgrade_no_upgrade_locks_still_provisions_pyproject_venv_for_gate(tmp_path: Path) -> None:
+    env, _, bin_dir = make_isolated_env(tmp_path)
+    _ensure_bash_in_bin(bin_dir)
+
+    uv_log = tmp_path / "uv.jsonl"
+    cargo_log = tmp_path / "cargo.jsonl"
+    gate_marker = tmp_path / "gate-ran.log"
+    _install_venv_uv_shim(bin_dir, uv_log)
+    make_python_shim(bin_dir, "cargo", "import sys\nsys.exit(2)\n", log_path=cargo_log)
+
+    gate_body = (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'test -n "${VIRTUAL_ENV:-}"\n'
+        'test "$(command -v venv-tool)" = "$VIRTUAL_ENV/bin/venv-tool"\n'
+        'test "$(venv-tool)" = "venv-active"\n'
+        f"echo ran >> '{gate_marker}'\n"
+    )
+    repos = [
+        _init_repo_with_bare_origin(
+            tmp_path,
+            name,
+            env,
+            gate_body=gate_body,
+            agcoord="none",
+            docs_exemption=False,
+            stale_agents=True,
+            extra_files={"pyproject.toml": pyproject, "Cargo.lock": "version = 3\n"},
+        )[0]
+        for name, pyproject in (
+            ("project-repo", '[project]\nname = "demo"\nversion = "0.1.0"\n\n[project.optional-dependencies]\ntest = ["pytest"]\n'),
+            ("tool-repo", '[dependency-groups]\ntest = ["pytest>=8"]\n'),
+        )
+    ]
+
+    # --dry-run plans venv provisioning but no lock upgrades.
+    for entry in _run_upgrade(tmp_path, env, repos, "--no-upgrade-locks", "--dry-run").values():
+        assert "provision_pyproject_venv" in entry["planned_steps"]
+        assert "upgrade_uv_lock" not in entry["planned_steps"]
+        assert "upgrade_cargo_lock" not in entry["planned_steps"]
+
+    def _assert_provisioned_without_upgrades() -> None:
+        calls = [c["argv"][1:] for c in _read_jsonl(uv_log)]
+        assert sum(1 for argv in calls if argv[:2] == ["venv", "--seed"]) == 2
+        installs = [argv for argv in calls if argv[:2] == ["pip", "install"]]
+        assert len(installs) == 2
+        assert sum(1 for argv in installs if ".[test]" in argv) == 1
+        assert sum(1 for argv in installs if "pytest>=8" in argv) == 1
+        assert not any("--upgrade" in argv or "serde" in argv for argv in calls)
+        assert not any(argv[:1] == ["lock"] for argv in calls)
+        assert _read_jsonl(cargo_log) == []
+
+    # Policy sync drift without docs_exemption: the gate runs inside the isolated venv.
+    synced = _run_upgrade(tmp_path, env, repos, "--no-upgrade-locks", "--package", "serde")
+    for entry in synced.values():
+        assert entry["status"] == "changes_verified"
+        assert entry["changed_files"] == ["AGENTS.md"]
+    assert gate_marker.read_text(encoding="utf-8").splitlines() == ["ran", "ran"]
+    _assert_provisioned_without_upgrades()
+
+    # Explicit gate-only sweep: same provisioning, gate still runs.
+    uv_log.unlink()
+    gate_marker.unlink()
+    gate_only = _run_upgrade(
+        tmp_path, env, repos, "--no-sync-policy", "--no-upgrade-locks", "--package", "serde"
+    )
+    for entry in gate_only.values():
+        assert entry["status"] == "up_to_date"
+    assert gate_marker.read_text(encoding="utf-8").splitlines() == ["ran", "ran"]
+    _assert_provisioned_without_upgrades()
+    _assert_no_upgrade_leftovers(tmp_path, env, repos)
+
+
+def test_repos_upgrade_no_upgrade_locks_skips_gate_when_up_to_date_or_docs_exempt(tmp_path: Path) -> None:
+    env, _, bin_dir = make_isolated_env(tmp_path)
+    _ensure_bash_in_bin(bin_dir)
+
+    agc_log = tmp_path / "agc.jsonl"
+    uv_log = tmp_path / "uv.jsonl"
+    gh_log = tmp_path / "gh.jsonl"
+    gh_state = tmp_path / "gh-state.json"
+    gate_marker = tmp_path / "gate-ran.log"
+    _install_gh_shim(bin_dir, gh_state, gh_log)
+    _install_venv_uv_shim(bin_dir, uv_log)
+    failing_gate = f"#!/usr/bin/env bash\necho ran >> '{gate_marker}'\nexit 1\n"
+
+    def _make(name: str, **kwargs: object) -> tuple[Path, Path]:
+        return _init_repo_with_bare_origin(tmp_path, name, env, gate_body=failing_gate, **kwargs)
+
+    synced, _ = _make(
+        "synced",
+        agcoord="required",
+        docs_exemption=False,
+        extra_files={"pyproject.toml": '[dependency-groups]\ntest = ["pytest>=8"]\n'},
+    )
+    exempt_auto, bare_auto = _make("exempt-auto", agcoord="auto", stale_agents=True)
+    exempt_required, bare_required = _make("exempt-required", agcoord="required", stale_agents=True)
+    skippable = [synced, exempt_auto, exempt_required]
+
+    def _assert_skipped(by_name: dict[str, dict], exempt_status: str) -> None:
+        assert by_name["synced"]["status"] == "up_to_date"
+        assert by_name["synced"]["changed_files"] == []
+        assert "skip_gate:up_to_date" in by_name["synced"]["upgrade_actions"]
+        for name in ("exempt-auto", "exempt-required"):
+            assert by_name[name]["status"] == exempt_status
+            assert by_name[name]["changed_files"] == ["AGENTS.md"]
+            assert "skip_gate:docs_exemption" in by_name[name]["upgrade_actions"]
+        assert all(entry["used_agcoord"] is False for entry in by_name.values())
+        assert not gate_marker.exists()
+        assert _read_jsonl(uv_log) == []
+
+    # 1. No agc on PATH at all: even agcoord = "required" repos succeed because nothing is gated.
+    _assert_skipped(_run_upgrade(tmp_path, env, skippable, "--no-upgrade-locks"), "changes_verified")
+
+    # 2. With a healthy agc available, neither agc run nor agc land is invoked, with or without --land.
+    _install_agc_shim(bin_dir, agc_log)
+    _assert_skipped(_run_upgrade(tmp_path, env, skippable, "--no-upgrade-locks"), "changes_verified")
+    assert _read_jsonl(gh_log) == []
+
+    landed = _run_upgrade(tmp_path, env, skippable, "--no-upgrade-locks", "--land")
+    _assert_skipped(landed, "landed")
+    for name, bare in (("exempt-auto", bare_auto), ("exempt-required", bare_required)):
+        entry = landed[name]
+        assert entry["land_method"] == "gh_pr_merge_docs_exemption"
+        assert entry["issue_url"]
+        assert entry["pr_url"]
+        assert _git(bare, env, "show", "--name-only", "--pretty=format:", entry["branch"]).split() == ["AGENTS.md"]
+    gh_verbs = [c["argv"][1:3] for c in _read_jsonl(gh_log)]
+    assert gh_verbs == [["issue", "create"], ["pr", "create"], ["pr", "merge"]] * 2
+    assert not any(c["argv"][1] in ("run", "land") for c in _read_jsonl(agc_log))
+    _assert_no_upgrade_leftovers(tmp_path, env, skippable)
+
+    # 3. Controls: the gate still runs without docs_exemption, for gate-only sweeps, and by default.
+    strict, _ = _make("strict", agcoord="none", docs_exemption=False, stale_agents=True)
+    gate_only, _ = _make("gate-only", agcoord="none")
+    for repo, flags in (
+        (strict, ("--no-upgrade-locks",)),
+        (gate_only, ("--no-sync-policy", "--no-upgrade-locks")),
+        (gate_only, ()),
+    ):
+        gate_marker.unlink(missing_ok=True)
+        entry = _run_upgrade(tmp_path, env, [repo], *flags, expect_exit=1)[repo.name]
+        assert entry["status"] == "gate_failed"
+        assert gate_marker.read_text(encoding="utf-8") == "ran\n"
+    _assert_no_upgrade_leftovers(tmp_path, env, [strict, gate_only])
+
+
+def test_repos_upgrade_commits_candidate_before_gate_and_discards_gate_debris(tmp_path: Path) -> None:
+    env, _, bin_dir = make_isolated_env(tmp_path)
+    _ensure_bash_in_bin(bin_dir)
+
+    agc_log = tmp_path / "agc.jsonl"
+    gh_log = tmp_path / "gh.jsonl"
+    _install_agc_shim(bin_dir, agc_log)
+
+    # Fake gh records the candidate checkout's state at the moment the PR is opened.
+    pr_status = tmp_path / "pr-create-status.txt"
+    make_python_shim(
+        bin_dir,
+        "gh",
+        f"""
+        import pathlib, subprocess, sys
+        argv = sys.argv[1:]
+        if argv[:2] == ["issue", "create"]:
+            print("https://github.com/example/repo/issues/10")
+            sys.exit(0)
+        if argv[:2] == ["pr", "create"]:
+            status = subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=all"], text=True)
+            pathlib.Path({str(pr_status)!r}).write_text(status, encoding="utf-8")
+            print("https://github.com/example/repo/pull/100")
+            sys.exit(0)
+        if argv[:2] == ["pr", "merge"]:
+            sys.exit(0)
+        sys.exit(2)
+        """,
+        log_path=gh_log,
+    )
+
+    # Mirrors an "installed gate requires a clean candidate checkout" gate, then leaves
+    # untracked, tracked, and staged debris behind.
+    clean_gate = (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [ -n "$(git status --porcelain)" ]; then\n'
+        "  echo 'installed gate requires a clean candidate checkout' >&2\n"
+        "  git status --porcelain >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        'test "$(git diff --name-only HEAD~1 HEAD)" = "AGENTS.md"\n'
+        "echo stray > stray.tmp\n"
+        "echo staged > staged.tmp\n"
+        "git add staged.tmp\n"
+        "echo 'gate touched' >> README.md\n"
+    )
+    repo, bare = _init_repo_with_bare_origin(
+        tmp_path,
+        "clean-candidate",
+        env,
+        gate_body=clean_gate,
+        agcoord="auto",
+        docs_exemption=False,
+        stale_agents=True,
+    )
+    # A host without any configured Git identity must still be able to verify and land.
+    _git(repo, env, "config", "--unset", "user.name")
+    _git(repo, env, "config", "--unset", "user.email")
+    _git(repo, env, "config", "user.useConfigOnly", "true")
+
+    verified = _run_upgrade(tmp_path, env, [repo])["clean-candidate"]
+    assert verified["status"] == "changes_verified"
+    assert verified["changed_files"] == ["AGENTS.md"]
+    assert verified["used_agcoord"] is True
+    _assert_no_upgrade_leftovers(tmp_path, env, [repo])
+    assert _git(bare, env, "branch", "--list", "gardenia-upgrade-*") == ""
+
+    landed = _run_upgrade(tmp_path, env, [repo], "--land")["clean-candidate"]
+    assert landed["status"] == "landed"
+    assert landed["land_method"] == "agc_land"
+    assert landed["changed_files"] == ["AGENTS.md"]
+    assert pr_status.read_text(encoding="utf-8") == ""
+    assert _git(bare, env, "diff", "--name-only", f"main..{landed['branch']}").split() == ["AGENTS.md"]
+    assert _git(bare, env, "rev-list", "--count", f"main..{landed['branch']}").strip() == "1"
+    _assert_no_upgrade_leftovers(tmp_path, env, [repo])
+
+
+def test_repos_upgrade_discards_venv_install_debris_before_gate(tmp_path: Path) -> None:
+    env, _, bin_dir = make_isolated_env(tmp_path)
+    _ensure_bash_in_bin(bin_dir)
+    _install_venv_uv_shim(bin_dir, tmp_path / "uv.jsonl", install_debris=True)
+
+    repo, _ = _init_repo_with_bare_origin(
+        tmp_path,
+        "install-debris",
+        env,
+        gate_body='#!/usr/bin/env bash\nset -euo pipefail\ntest -z "$(git status --porcelain)"\n',
+        agcoord="none",
+        extra_files={"pyproject.toml": '[project]\nname = "demo"\nversion = "0.1.0"\n'},
+    )
+
+    entry = _run_upgrade(tmp_path, env, [repo])["install-debris"]
+    assert entry["status"] == "up_to_date"
+    assert entry["changed_files"] == []
+    _assert_no_upgrade_leftovers(tmp_path, env, [repo])

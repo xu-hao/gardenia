@@ -315,13 +315,16 @@ def build_parser() -> argparse.ArgumentParser:
         dest="upgrade_locks",
         action="store_true",
         default=True,
-        help="Refresh uv.lock/Cargo.lock or provision a fresh test venv for pyproject.toml repos (default).",
+        help="Refresh uv.lock/Cargo.lock and upgrade test-venv dependencies for pyproject.toml repos (default).",
     )
     locks_group.add_argument(
         "--no-upgrade-locks",
         dest="upgrade_locks",
         action="store_false",
-        help="Skip lockfile and dependency upgrades.",
+        help=(
+            "Skip lockfile and dependency upgrades (test venvs are still provisioned when the gate runs). "
+            "With policy sync, also skip the gate when nothing changed or the docs exemption applies."
+        ),
     )
 
     repos_upgrade.add_argument(

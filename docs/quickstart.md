@@ -18,7 +18,7 @@ uv tool install gardenia
 gardenia --version
 ```
 
-Expect `gardenia 0.2.4`.
+Expect `gardenia 0.2.5`.
 
 ## Step 1 — Once per workstation (`gardenia host`)
 
@@ -130,6 +130,11 @@ gardenia repos upgrade --package howhard --file-issues
 Pass `--land` to commit verified policy/lockfile updates on a dedicated branch, open a
 tracking issue and pull request, and land through `agc land` (or `gh pr merge` when only
 documentation-exempt files changed).
+
+For a policy-only sweep, pass `--no-upgrade-locks`. Repositories that are already in sync,
+or whose only changes qualify under `docs_exemption`, skip the gate; the rest still run it
+with a provisioned test virtualenv, without dependency upgrades. See
+`gardenia repos upgrade` in the [CLI reference](reference.md) for the exact rules.
 
 ## Unified check
 

@@ -17,7 +17,7 @@
 gardenia --version
 ```
 
-Prints `gardenia 0.2.4` and exits `0`.
+Prints `gardenia 0.2.5` and exits `0`.
 
 ## `gardenia host check`
 
@@ -227,25 +227,46 @@ gardenia repos upgrade \
 | `--repo PATH` | unset | Explicit target repository path (repeatable; overrides `repos.toml`). |
 | `--package PKG` | unset | Specific package to upgrade (repeatable; validated against whitespace and shell metacharacters). |
 | `--sync-policy` / `--no-sync-policy` | enabled | Refresh `AGENTS.md` / `CLAUDE.md` via `init_repo(..., allow_worktree=True, register=False)` inside the temporary worktree. |
-| `--upgrade-locks` / `--no-upgrade-locks` | enabled | Refresh `uv.lock` (`uv lock --upgrade` / `--upgrade-package`), `Cargo.lock` (`cargo update` / `-p`), or provision an isolated seeded test virtualenv (`uv venv --seed`) for `pyproject.toml` repositories without `uv.lock`. |
-| `--land` | disabled | Commit verified updates on `gardenia-upgrade-<timestamp>`, push to `origin`, open a tracking issue and PR (`Closes #<N>`), and land via `agc land` (or `gh pr merge --merge --delete-branch` when all changed files qualify under `docs_exemption` or `agc` is not active). |
+| `--upgrade-locks` / `--no-upgrade-locks` | enabled | Refresh `uv.lock` (`uv lock --upgrade` / `--upgrade-package`) and `Cargo.lock` (`cargo update` / `-p`), and upgrade test-virtualenv dependencies. `--no-upgrade-locks` disables those upgrades only; it does not disable virtualenv provisioning, and with `--sync-policy` it enables the gate bypass described below. |
+| `--land` | disabled | Push the verified candidate commit on `gardenia-upgrade-<timestamp>` to `origin`, open a tracking issue and PR (`Closes #<N>`), and land via `agc land` (or `gh pr merge --merge --delete-branch` when all changed files qualify under `docs_exemption` or `agc` is not active). |
 | `--file-issues` | disabled | When a repository gate fails, open a GitHub issue via `gh` (or reuse an existing open issue with the same upgrade-failure title). |
 | `--gate-timeout SECONDS` | `7200.0` | Timeout in seconds for each repository validation gate and `agc land` invocation (must be finite and `> 0`). |
 | `--worktree-root DIR` | `/var/tmp` (or temp dir) | Base directory for temporary isolated worktrees (cleaned up unconditionally in `finally`). |
 | `--log-dir DIR` | `$GARDENIA_LOG_DIR` or `${XDG_STATE_HOME:-~/.local/state}/gardenia/logs` | Directory where failed gate logs are persisted. |
-| `--dry-run` | disabled | Inspect target repositories read-only and report planned steps without creating worktrees or running gates. |
+| `--dry-run` | disabled | Inspect target repositories read-only and report planned steps without creating worktrees or running gates. Changed files are unknown at plan time, so the plan always lists the gate even if the real run may bypass it. |
 | `--json` | disabled | Emit `gardenia-repos-upgrade-v1` JSON. |
 
 Virtual environment provisioning for `pyproject.toml` repositories without `uv.lock`:
 
+- Provisioning happens whenever the gate runs, with or without `--upgrade-locks`. Under `--no-upgrade-locks`, no install command receives `--upgrade` and the separate `--upgrade <PKG ...>` step for `--package` is skipped.
 - Temporary virtual environments are created with `uv venv --seed <venv>` so `python -m pip` is available inside repository gate commands.
 - When `[project]` is present in `pyproject.toml`, `gardenia` collects every present key among `("test", "docs", "dev")` in `[project.optional-dependencies]` and installs `-e ".[<extras>]"` (or `-e .` when none are defined), together with any requirements from `[dependency-groups]` (`dev`, `test`, `docs`, resolving `{"include-group": ...}` recursively) and `-r docs/requirements.txt` if present and `"docs"` was not already in `[project.optional-dependencies]`.
-- When `[project]` is absent from `pyproject.toml` (PEP 735 tool/plugin repositories), editable installation (`-e .`) is skipped; instead, requirements from present `("dev", "test", "docs")` entries in `[dependency-groups]` (plus `-r docs/requirements.txt` if present) are installed with `uv pip install --python <venv_python> --upgrade`.
+- When `[project]` is absent from `pyproject.toml` (PEP 735 tool/plugin repositories), editable installation (`-e .`) is skipped; instead, requirements from present `("dev", "test", "docs")` entries in `[dependency-groups]` (plus `-r docs/requirements.txt` if present) are installed with `uv pip install --python <venv_python>`, adding `--upgrade` only under `--upgrade-locks`.
+- When `uv` is not on `PATH`, the equivalent `python -m venv` and `pip install` commands are used.
 
-Pre-gate diff isolation:
+#### Gate bypass under `--no-upgrade-locks`
 
-- `changed_files` is recorded from `git status --porcelain` inside the isolated worktree after policy sync and lockfile/dependency upgrades, **before** running the validation gate.
-- After the gate succeeds and before creating any `--land` branch or commit, untracked files and directories created by the gate that were not in `changed_files` are removed and only `changed_files` are staged (`git add -- ...`).
+When `--no-upgrade-locks` is combined with `--sync-policy` (the default policy setting), the
+gate, `agc run`, and virtualenv provisioning are skipped, and `used_agcoord` is `false`, in
+two cases. `agcoord = "required"` does not require `agc` for a skipped gate.
+
+| Condition after policy sync | Result | `upgrade_actions` entry |
+| --- | --- | --- |
+| No files changed | `up_to_date` | `skip_gate:up_to_date` |
+| `docs_exemption = true` and every changed file is documentation-exempt | `changes_verified`, or with `--land`, `landed` via `gh_pr_merge_docs_exemption` | `skip_gate:docs_exemption` |
+
+A `skip_gate:docs_exemption` result means the documentation-only exemption applied, not
+that the gate passed. In every other case the gate runs: changes that do not qualify (including any
+drift when `docs_exemption = false`), a gate-only sweep with
+`--no-sync-policy --no-upgrade-locks`, and every run with `--upgrade-locks`.
+
+#### Clean candidate checkout
+
+- `changed_files` is recorded from `git status --porcelain` inside the isolated worktree after policy sync and lockfile upgrades, **before** virtualenv provisioning and the validation gate.
+- When the gate runs and `changed_files` is not empty, only those files are committed (`git add -- ...`) to a local `gardenia-upgrade-<timestamp>` branch **before** the gate starts. This happens with or without `--land`, so the repository's commit hooks run in both cases. If no Git `user.name` or `user.email` is configured, `gardenia` supplies `gardenia` / `gardenia@localhost` for that commit.
+- Immediately before the gate, anything virtualenv provisioning left in the source tree is discarded (modified tracked files, plus untracked files that are not ignored), so gates that require a clean checkout pass.
+- After the gate succeeds, its modifications to tracked files, staged entries, and untracked files that are not ignored are discarded before any `--land` push or PR. `--land` pushes the candidate branch; when the gate was bypassed, the commit is created at this point.
+- The temporary worktree and the local candidate branch are removed in `finally`. Without `--land`, nothing is pushed.
 
 Per-repository statuses in `gardenia-repos-upgrade-v1`:
 
@@ -297,7 +318,7 @@ via a sibling temporary file plus `os.replace`. Malformed TOML, unknown keys, wr
 ```json
 {
   "format": "gardenia-check-v1",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "ok": true,
   "strict": false,
   "host": {
