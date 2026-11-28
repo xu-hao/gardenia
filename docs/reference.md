@@ -9,7 +9,7 @@
 | ---: | --- |
 | `0` | Success; checks found no errors (and no warnings when `--strict` is set). |
 | `1` | Check found one or more errors (or warnings under `--strict`), or a host setup command failed. |
-| `2` | Invalid CLI usage, invalid configuration, or safety precondition refusal (for example: non-Git directory, linked worktree without `--allow-worktree`, `--broker user` against an active `cgroup-v2` enforced broker without `--force-broker`, broker mutation when the `agc --json list --limit 1` probe timed out without `--broker skip` or `--force-broker`, or overwriting an existing `~/.config/agroute/config.toml` without `--overwrite-config`). |
+| `2` | Invalid CLI usage, invalid configuration, or safety precondition refusal (for example: invalid host `config.toml`, `--stealth` over a tracked profile, non-Git directory, linked worktree without `--allow-worktree`, `--broker user` against an active `cgroup-v2` enforced broker without `--force-broker`, broker mutation when the `agc --json list --limit 1` probe timed out without `--broker skip` or `--force-broker`, or overwriting an existing `~/.config/agroute/config.toml` without `--overwrite-config`). |
 
 ## Global options
 
@@ -18,6 +18,70 @@ gardenia --version
 ```
 
 Prints `gardenia 0.2.5` and exits `0`.
+
+## Host tool and plugin configuration (`config.toml`)
+
+The built-in tools and plugins can be extended or overridden per host. The path resolves as:
+
+1. `$GARDENIA_HOST_CONFIG` (when set and non-empty), else
+2. `${XDG_CONFIG_HOME}/gardenia/config.toml` (when `XDG_CONFIG_HOME` is set), else
+3. `${HOME}/.config/gardenia/config.toml`.
+
+A missing file means built-in defaults only. Unknown keys, wrong types, duplicate names,
+and unsupported sources fail with exit code `2` before any host mutation. See the
+[`hotgate` example](host-vs-repo.md#custom-and-private-tools).
+
+An entry whose `name` matches a built-in (`howhard`, `agroute`, `agcoord` tools;
+`agrein`, `agcoord`, `howhard`, `agroute` plugins) overrides only the keys it sets,
+including `min_version`. Any other entry is added after the built-ins. Names use letters,
+digits, `.`, `_`, and `-`, start with a letter or digit, and cannot be `gardenia`.
+
+### `[[tools]]`
+
+| Key | Required | Default | Description |
+| --- | --- | --- | --- |
+| `name` | yes | | Tool name. `pipx upgrade` uses it for Git and path installs, so match the distribution name. |
+| `install_target` or `package` | for new tools | | Install source; set only one. There is no default, so a private name is never installed from a public index by accident. |
+| `binary` | no | `name` | Executable looked up on `PATH`. `<binary> --version` must print a `MAJOR.MINOR.PATCH` version. |
+| `min_version` | no | `0.0.0` | Minimum accepted version. |
+| `linux_only` | no | `false` | Skip the tool on non-Linux hosts. |
+
+Accepted install sources:
+
+| Form | Example | Passed to the installer as |
+| --- | --- | --- |
+| PyPI name, optionally with extras or one version clause | `my-tool`, `my-tool[extra]>=1.0` | unchanged |
+| Git over SSH or HTTPS | `git+ssh://git@github.com/<owner>/repo.git`, `git+https://...` | unchanged (`git+` is added to `ssh://` URLs and `https://...git` URLs) |
+| `user@host:path` | `git@github.com:<owner>/repo.git` | `git+ssh://user@host/path` |
+| GitHub `owner/repo` | `<owner>/repo` | `git+https://github.com/<owner>/repo.git` |
+| Local path starting with `/`, `./`, `../`, or `~/` | `../repo` | absolute path (relative paths resolve against the config file's directory); upgrades add `--reinstall` under `uv` |
+
+### `[[plugins]]`
+
+| Key | Required | Default | Description |
+| --- | --- | --- | --- |
+| `name` | yes | | Plugin name, also its Claude Code and Codex marketplace name (`<name>@<name>`). |
+| `source` | for new plugins | | Git URL (`git+ssh://`, `git+https://`, `ssh://`, `https://`, or `user@host:path`), GitHub `owner/repo`, or a local path as above. A PyPI name is rejected. |
+| `clients` | no | `["codex", "claude", "agy"]` | Clients that should have the plugin. |
+| `cli` | no | unset | Name of a built-in or configured tool, used for CLI-vs-plugin version drift. |
+
+`claude` and `codex` receive `source` with any `git+` prefix removed. `agy` receives the
+same, except that GitHub `owner/repo` becomes `https://github.com/<owner>/<repo>`.
+
+### `AGENTS.snippet.md` resolution
+
+For a repository tool, `gardenia` reads `<plugin_root>/AGENTS.snippet.md` from the
+configured plugin of the same name. It never runs the tool's own binary.
+
+| Client | Installed plugin root |
+| --- | --- |
+| `codex` | The highest cached version directory `~/.codex/plugins/cache/<name>/<name>/<version>/`, only when `config.toml` configures `<name>@<name>`. |
+| `claude` | `installPath` from `claude plugin list --json`. |
+| `agy` | `path` from `agy plugin list --json`. |
+
+Among installed copies that ship the file, the highest version wins; ties follow the order
+`codex`, `claude`, `agy`. When none provides it, a plugin whose `source` is a local
+directory is read from that directory.
 
 ## `gardenia host check`
 
@@ -35,7 +99,9 @@ gardenia host check [--clients codex,claude,agy] [--with-agcoord] [--strict] [--
 | `--strict` | Exit `1` on warnings (such as CLI-vs-plugin version drift) as well as errors. |
 | `--json` | Emit `gardenia-check-v1` JSON output. |
 
-Checks performed:
+Checks performed (items 1, 3, and 4 also cover [configured tools and
+plugins](#host-tool-and-plugin-configuration-configtoml), each plugin only for its listed
+`clients`):
 
 1. Host CLIs on `PATH`: `howhard` (`>= 6.0.0`), `agr` (`>= 0.7.0`), and on Linux `agc`
    (`>= 0.10.0`).
@@ -93,6 +159,12 @@ gardenia host setup \
 | `--dry-run` | Return the ordered action plan without executing commands or writing files. |
 | `--json` | Emit structured JSON result including the ordered `actions` list. |
 
+`gardenia host setup` installs configured tools from their install source and registers
+configured plugins from their `source` in the same ordered plan as the built-ins. In JSON,
+each `host.clis` entry is keyed by tool name and includes `install_target`, each client
+plugin entry includes `install_path`, and `host.config` reports `path`, `exists`,
+`user_tools`, and `user_plugins`.
+
 ## `gardenia repo check`
 
 Read-only repository diagnostic separating tracked policy from local per-clone `.git/`
@@ -102,9 +174,21 @@ state. Exits `2` if the target directory is not inside a Git repository.
 gardenia repo check [--repo PATH] [--strict] [--json]
 ```
 
+For each name in the profile's `tools`, a missing or malformed
+`<!-- <tool>:begin --> ... <!-- <tool>:end -->` block is an `error` with component
+`agents-md:<tool>`. A block is malformed when its markers are unpaired, repeated, or out of
+order, when it is empty, when it contains another block marker, or when it sits inside the
+`gardenia` block. Block content is not compared, and no host configuration or plugin
+directory is read.
+
+Under a [stealth profile](host-vs-repo.md#external-or-shared-repositories-stealth-profiles),
+`config.source` is `stealth`, `agents_md.in_sync` is `null`, and tracked blocks and the
+`CLAUDE.md` symlink are not required. `AGENTS.md` markers for `gardenia` or a declared tool
+raise a warning.
+
 Reports:
 
-- `repo.tracked`: `root`, `is_linked_worktree`, `config` (`gardenia.toml`, `[tool.gardenia]`,
+- `repo.tracked`: `stealth`, `sibling_blocks` (`present` and `malformed` per tool), `root`, `is_linked_worktree`, `config` (`gardenia.toml`, `[tool.gardenia]`,
   or `defaults`), `agents_md` (presence, managed block markers, drift vs. rendered block,
   referenced layers), `claude_md` (`symlink_to_agents`, `symlink_other`, `regular_file`,
   `missing`), and optional `howhard.toml` / `agroute.toml` TOML validity.
@@ -134,17 +218,26 @@ Shared profile options:
 | `--agcoord MODE` | `auto` | `auto` (use `agc` on Linux, direct gate elsewhere), `required`, or `none`. |
 | `--docs-exemption` / `--no-docs-exemption` | enabled | Include or omit the documentation-only exemption clause (aliases: `--docs-only-exemption` / `--no-docs-only-exemption`). |
 | `--claude-symlink` / `--no-claude-symlink` | enabled | Manage `CLAUDE.md -> AGENTS.md`. |
+| `--tool NAME` | profile `tools` | Declare a tool with its own `AGENTS.md` block. Repeatable; when passed, replaces the profile's list. Add `--save-config` or `--stealth` to persist it. |
 
 Additional `gardenia repo init` options:
 
 | Flag | Description |
 | --- | --- |
 | `--force-claude-symlink` | Replace a non-matching regular file or symlink at `CLAUDE.md`. |
+| `--stealth` | Store the profile at `<git-common-dir>/gardenia/gardenia.toml` and modify no tracked file. Allowed in linked worktrees; refused with exit `2` over a tracked profile or with `--save-config` / `--force-claude-symlink`. An existing stealth profile keeps `repo init` in this mode without the flag. |
 | `--save-config` | Write the resolved profile cleanly to `gardenia.toml`. |
 | `--allow-worktree` | Allow running `repo init` inside a linked Git worktree (otherwise refused with exit `2`). |
 | `--register` / `--no-register` | Control updating the host repository registry (`repos.toml`). Defaults to registering primary checkouts and automatically skipping linked worktrees; explicit `--register` on a linked worktree is refused with exit `2`. |
 | `--dry-run` | Plan edits without writing files. |
 | `--json` | Emit structured JSON output. |
+
+`repo init` stamps or refreshes one sibling block per declared tool from the resolved
+[`AGENTS.snippet.md`](#agentssnippetmd-resolution), appending new blocks at the end of
+`AGENTS.md`. It reads host state only when the profile declares `tools`. If a snippet cannot
+be resolved or is invalid, the command still succeeds, leaves that block untouched, adds a
+`warnings` entry, and lists the tool in `unresolved_tools`. Malformed sibling markers fail
+with exit `2` before anything is written. `repo render` prints only the `gardenia` block.
 
 ## `gardenia repos`
 
@@ -181,7 +274,9 @@ gardenia repos prune [--dry-run] [--json]
 - `repos scan`: Walks `--root` up to `--max-depth` (default `2`, must be `>= 0`),
   skipping hidden directories, `node_modules`, `__pycache__`, and linked worktrees, and
   registers primary Git checkouts managed by `gardenia` (`gardenia.toml`,
-  `[tool.gardenia]` in `pyproject.toml`, or `<!-- gardenia:begin -->` in `AGENTS.md`).
+  `[tool.gardenia]` in `pyproject.toml`, `<!-- gardenia:begin -->` in `AGENTS.md`, or a
+  stealth profile). A repository with a valid stealth profile has
+  `agents_md_in_sync: null`.
 - `repos prune`: Removes entries from `repos.toml` that no longer exist on disk or are
   no longer primary Git checkouts.
 
@@ -195,6 +290,13 @@ repo-level error entries rather than aborting the fleet check.
 ```sh
 gardenia repos check [--root PATH] [--repo PATH ...] [--max-depth INT] [--strict] [--json]
 ```
+
+For repositories whose profile declares `tools`, `repos check` also verifies that each tool
+is configured on this host, that its CLI meets `min_version`, and that its plugin is
+installed and enabled for the detected clients (`"scope": "host"`). Outside stealth mode, it
+warns with component `agents-md:<tool>` when a block differs from the installed snippet, and
+errors when an installed plugin provides no usable snippet. An invalid host `config.toml`
+becomes a `host-config` error on those repositories only.
 
 Emits `gardenia-repos-check-v1` JSON and exits `0` when all repositories pass or `1`
 when any repository fails.
@@ -235,6 +337,22 @@ gardenia repos upgrade \
 | `--log-dir DIR` | `$GARDENIA_LOG_DIR` or `${XDG_STATE_HOME:-~/.local/state}/gardenia/logs` | Directory where failed gate logs are persisted. |
 | `--dry-run` | disabled | Inspect target repositories read-only and report planned steps without creating worktrees or running gates. Changed files are unknown at plan time, so the plan always lists the gate even if the real run may bypass it. |
 | `--json` | disabled | Emit `gardenia-repos-upgrade-v1` JSON. |
+
+Sibling blocks and `--package`:
+
+- `--sync-policy` refreshes every declared tool's sibling block along with the `gardenia`
+  block, including when `--package <name>` is passed. Dry runs list
+  `sync_sibling_block:<tool>` steps.
+- An unresolved snippet leaves the committed block in place and records
+  `skip_sibling_block:<tool>:unresolved`. If `--package` names that tool exactly, the
+  repository ends in `error` instead.
+- A `--package` value naming a declared or user-configured tool is passed to `uv`, `pip`, or
+  `cargo` only when the repository declares or locks a dependency of that name. Otherwise it
+  is recorded as `skip_dependency_upgrade:<name>:host-tool`. When every `--package` value is
+  skipped this way, no lock or dependency upgrade runs; the sweep does not widen to
+  upgrading everything.
+- `--package` does not upgrade host tools; use `gardenia host setup --upgrade`.
+- Repositories with a stealth profile receive no policy file changes.
 
 Virtual environment provisioning for `pyproject.toml` repositories without `uv.lock`:
 
@@ -282,10 +400,15 @@ or when `--repo PATH` is provided.
 gardenia check [--repo PATH] [--clients codex,claude,agy] [--with-agcoord] [--strict] [--json]
 ```
 
+When the repository profile declares `tools`, `gardenia check` applies the same
+per-tool host and snippet sync verification as `repos check`, reporting each finding once.
+
 ## Tracked configuration schema (`gardenia.toml` / `[tool.gardenia]`)
 
 `gardenia` reads `gardenia.toml` at the repository root first, falling back to
-`[tool.gardenia]` in `pyproject.toml`. Unknown keys or invalid types are rejected.
+`[tool.gardenia]` in `pyproject.toml`. When neither exists, the untracked stealth profile at
+`<git-common-dir>/gardenia/gardenia.toml` applies, using the same keys. Unknown keys or
+invalid types are rejected.
 
 ```toml
 gate = "bash scripts/check"
@@ -297,6 +420,7 @@ routing = "agroute"      # "agroute" | "howhard" | "none"
 agcoord = "auto"         # "auto" | "required" | "none"
 docs_exemption = true
 claude_symlink = true
+# tools = ["hotgate"]    # sibling AGENTS.md blocks; unique names, never "gardenia"
 ```
 
 ## Host repository registry schema (`repos.toml`)

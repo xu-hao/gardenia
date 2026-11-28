@@ -15,7 +15,7 @@ import tomllib
 from typing import Any, Mapping, Sequence
 
 from gardenia import __version__
-from gardenia.host import BROKER_PROBE_TIMEOUT_SECONDS
+from gardenia.host import BROKER_PROBE_TIMEOUT_SECONDS, HostInventory, load_host_config, verify_repo_tools
 from gardenia.models import (
     DEFAULT_TIMEOUT_SECONDS,
     DEFAULT_TMPFS_INODES,
@@ -26,6 +26,7 @@ from gardenia.models import (
     REPOS_UPGRADE_FORMAT,
     Finding,
     GardeniaError,
+    compute_ok,
     is_finite_number,
     run_cmd,
 )
@@ -37,6 +38,7 @@ from gardenia.repo import (
     load_repo_config,
     render_managed_block,
     resolve_git_repo,
+    stealth_profile_path,
     try_resolve_git_repo,
 )
 
@@ -232,8 +234,11 @@ def save_repos_registry(
     }
 
 
-def is_gardenia_managed(repo_root: Path) -> bool:
-    """Return True if ``repo_root`` contains gardenia config or managed AGENTS.md markers."""
+def is_gardenia_managed(repo_root: Path, git_common_dir: Path | None = None) -> bool:
+    """Return True if ``repo_root`` has gardenia config, managed AGENTS.md markers, or a stealth profile."""
+
+    if stealth_profile_path(git_common_dir or repo_root / ".git").is_file():
+        return True
 
     if (repo_root / "gardenia.toml").is_file():
         return True
@@ -290,7 +295,7 @@ def discover_managed_repos(
         if git_marker.exists():
             info = try_resolve_git_repo(current, env=effective_env)
             if info is not None:
-                if not info.is_linked_worktree and info.root == current and is_gardenia_managed(info.root):
+                if not info.is_linked_worktree and info.root == current and is_gardenia_managed(info.root, info.git_common_dir):
                     discovered.add(info.root)
                 # Do not descend inside a Git repository checkout or linked worktree.
                 continue
@@ -365,13 +370,16 @@ def _inspect_repo_summary(
             )
             clean = (status_res.stdout == "") if status_res.ok else None
 
-            managed = is_gardenia_managed(git_info.root)
+            managed = is_gardenia_managed(git_info.root, git_info.git_common_dir)
             if not managed:
                 strict_issues.append("unmanaged")
 
             agents_path = git_info.root / "AGENTS.md"
-            if agents_path.is_file():
-                cfg = load_repo_config(git_info.root)
+            cfg = load_repo_config(git_info.root, git_info.git_common_dir)
+            if cfg["stealth"]:
+                # Stealth repositories keep no tracked managed block to compare.
+                agents_md_in_sync = None if cfg["valid"] else False
+            elif agents_path.is_file():
                 if cfg["valid"]:
                     try:
                         agents_text = agents_path.read_text(encoding="utf-8")
@@ -664,6 +672,7 @@ def check_repos(
     targets = resolve_fleet_targets(repos=repos, root=root, max_depth=max_depth, env=effective_env)
 
     repo_entries: list[dict[str, Any]] = []
+    inventory: HostInventory | None = None
     for target in targets:
         try:
             res = check_repo(target, strict=strict, env=effective_env)
@@ -688,7 +697,32 @@ def check_repos(
             )
             continue
 
+        ok = res["ok"]
         findings = res["findings"]
+        tools = res["repo"]["tracked"]["config"]["values"]["tools"]
+        if res["repo"]["tracked"]["config"]["valid"] and tools:
+            # Only repositories that declare tools require host inspection.
+            try:
+                if inventory is None:
+                    inventory = HostInventory(effective_env)
+                tool_findings = verify_repo_tools(
+                    tools,
+                    inventory,
+                    repo_root=Path(res["repo"]["tracked"]["root"]),
+                    stealth=res["repo"]["tracked"]["stealth"],
+                )
+            except GardeniaError as exc:
+                tool_findings = [
+                    Finding(
+                        scope="host",
+                        severity="error",
+                        component="host-config",
+                        message=exc.message,
+                        remediation="Fix the host gardenia configuration",
+                    )
+                ]
+            ok = ok and compute_ok(tool_findings, strict=strict)
+            findings = [*findings, *(f.to_dict() for f in tool_findings)]
         counts = {
             "errors": sum(1 for f in findings if f["severity"] == "error"),
             "warnings": sum(1 for f in findings if f["severity"] == "warning"),
@@ -698,7 +732,7 @@ def check_repos(
             {
                 "path": res["repo"]["tracked"]["root"],
                 "name": Path(res["repo"]["tracked"]["root"]).name,
-                "ok": res["ok"],
+                "ok": ok,
                 "error": None,
                 "repo": res["repo"],
                 "findings": findings,
@@ -932,6 +966,85 @@ def _collect_dependency_group_reqs(
             _resolve(norm_target)
 
     return collected
+
+
+_REQUIREMENT_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def _declared_dependency_names(wt_dir: Path) -> set[str]:
+    """Collect normalized names of every dependency the repository declares or locks."""
+
+    requirements: list[Any] = []
+    locked: list[Any] = []
+
+    def _load(name: str) -> dict[str, Any]:
+        try:
+            return tomllib.loads((wt_dir / name).read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            return {}
+
+    def _table(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    def _items(value: Any) -> list[Any]:
+        return value if isinstance(value, list) else []
+
+    pyproject = _load("pyproject.toml")
+    project = _table(pyproject.get("project"))
+    requirements.extend(_items(project.get("dependencies")))
+    for group in (*_table(project.get("optional-dependencies")).values(), *_table(pyproject.get("dependency-groups")).values()):
+        requirements.extend(_items(group))
+    requirements.extend(_items(_table(pyproject.get("build-system")).get("requires")))
+    try:
+        requirements.extend((wt_dir / "docs" / "requirements.txt").read_text(encoding="utf-8").splitlines())
+    except OSError:
+        pass
+    for lock_name in ("uv.lock", "Cargo.lock"):
+        locked.extend(_table(item).get("name") for item in _items(_load(lock_name).get("package")))
+
+    names = {_normalize_dep_group_name(name) for name in locked if isinstance(name, str)}
+    for requirement in requirements:
+        match = _REQUIREMENT_NAME_RE.match(requirement) if isinstance(requirement, str) else None
+        if match:
+            names.add(_normalize_dep_group_name(match.group(1)))
+    # The repository's own package (listed in its lockfile) is not a dependency of itself.
+    own_name = project.get("name")
+    if isinstance(own_name, str):
+        names.discard(_normalize_dep_group_name(own_name))
+    return names
+
+
+def _package_base_name(spec: str) -> str:
+    match = _REQUIREMENT_NAME_RE.match(spec)
+    return _normalize_dep_group_name(match.group(1) if match else spec)
+
+
+def _split_host_tool_packages(
+    packages: Sequence[str],
+    *,
+    wt_dir: Path,
+    profile_tools: Sequence[str],
+    env: Mapping[str, str],
+) -> tuple[list[str], list[str]]:
+    """Split ``--package`` values into repository dependencies and host-only tool names.
+
+    A declared or user-configured tool that the repository does not depend on must never be
+    handed to a package manager: a private tool's name may resolve to an unrelated public
+    package. Returns ``(dependency_packages, host_tool_packages)``.
+    """
+
+    if not packages:
+        return [], []
+    config = load_host_config(env)
+    tool_names = {
+        _normalize_dep_group_name(name)
+        for name in (*profile_tools, *config.user_tools, *config.user_plugins)
+    }
+    declared = _declared_dependency_names(wt_dir)
+    host_only = [
+        pkg for pkg in packages if _package_base_name(pkg) in tool_names - declared
+    ]
+    return [pkg for pkg in packages if pkg not in host_only], host_only
 
 
 def _build_pyproject_install_args(wt_dir: Path, *, upgrade: bool = True) -> list[str]:
@@ -1367,7 +1480,7 @@ def _plan_single_repo_upgrade(
             "error": f"Refusing to upgrade linked Git worktree {git_info.root}. Target the primary checkout instead.",
         }
 
-    cfg = load_repo_config(git_info.root)
+    cfg = load_repo_config(git_info.root, git_info.git_common_dir)
     if not cfg["valid"]:
         return {
             "path": str(git_info.root),
@@ -1394,6 +1507,8 @@ def _plan_single_repo_upgrade(
     steps: list[str] = ["create_isolated_worktree"]
     if sync_policy:
         steps.append("sync_policy")
+        if not cfg["stealth"]:
+            steps.extend(f"sync_sibling_block:{name}" for name in profile.tools)
     if upgrade_locks:
         if (git_info.root / "uv.lock").is_file():
             steps.append("upgrade_uv_lock")
@@ -1519,13 +1634,23 @@ def _execute_single_repo_upgrade(
         # 1. Optional policy sync inside isolated worktree (never registering temp worktree).
         if sync_policy:
             try:
-                init_repo(repo_path=wt_dir, allow_worktree=True, register=False, env=env)
+                sync_res = init_repo(repo_path=wt_dir, allow_worktree=True, register=False, env=env)
             except GardeniaError as exc:
                 return _error_result(str(repo_root), f"Policy sync failed: {exc.message}", base_ref=base_ref)
             upgrade_actions.append("sync_policy")
+            unresolved = sync_res["unresolved_tools"]
+            upgrade_actions.extend(f"skip_sibling_block:{name}:unresolved" for name in unresolved)
+            requested_unresolved = [name for name in unresolved if name in packages]
+            if requested_unresolved:
+                return _error_result(
+                    str(repo_root),
+                    "Policy sync failed: " + " ".join(sync_res["warnings"]),
+                    base_ref=base_ref,
+                    upgrade_actions=upgrade_actions,
+                )
 
         # 2. Load resolved RepoProfile inside the isolated worktree.
-        cfg = load_repo_config(wt_dir)
+        cfg = load_repo_config(wt_dir, git_info.git_common_dir)
         if not cfg["valid"]:
             return _error_result(
                 str(repo_root),
@@ -1538,13 +1663,27 @@ def _execute_single_repo_upgrade(
         # 3. Optional lockfile / dependency upgrades.
         gate_env = dict(env)
         uv_bin = shutil.which("uv", path=gate_env.get("PATH"))
+        try:
+            dependency_packages, host_tool_packages = _split_host_tool_packages(
+                packages,
+                wt_dir=wt_dir,
+                profile_tools=profile.tools,
+                env=env,
+            )
+        except GardeniaError as exc:
+            return _error_result(str(repo_root), exc.message, base_ref=base_ref, upgrade_actions=upgrade_actions)
+        # Naming only host tools must not widen into upgrading every dependency.
+        upgrade_dependencies = upgrade_locks and not (host_tool_packages and not dependency_packages)
         if upgrade_locks:
+            upgrade_actions.extend(f"skip_dependency_upgrade:{name}:host-tool" for name in host_tool_packages)
+
+        if upgrade_dependencies:
             cargo_bin = shutil.which("cargo", path=gate_env.get("PATH"))
 
             if (wt_dir / "uv.lock").is_file() and uv_bin:
                 uv_cmd = [uv_bin, "lock"]
-                if packages:
-                    for pkg in packages:
+                if dependency_packages:
+                    for pkg in dependency_packages:
                         uv_cmd.extend(["--upgrade-package", pkg])
                 else:
                     uv_cmd.append("--upgrade")
@@ -1564,7 +1703,7 @@ def _execute_single_repo_upgrade(
 
             if (wt_dir / "Cargo.lock").is_file() and cargo_bin:
                 cargo_cmd = [cargo_bin, "update"]
-                for pkg in packages:
+                for pkg in dependency_packages:
                     cargo_cmd.extend(["-p", pkg])
                 cargo_res = run_cmd(cargo_cmd, cwd=wt_dir, timeout=UPGRADE_CMD_TIMEOUT_SECONDS, env=gate_env)
                 upgrade_actions.append(" ".join(cargo_cmd))
@@ -1603,8 +1742,8 @@ def _execute_single_repo_upgrade(
                     wt_dir,
                     venv_dir=scratch_dir / "venv",
                     uv_bin=uv_bin,
-                    upgrade=upgrade_locks,
-                    packages=packages,
+                    upgrade=upgrade_dependencies,
+                    packages=dependency_packages,
                     gate_env=gate_env,
                     upgrade_actions=upgrade_actions,
                     upgrade_logs=upgrade_logs,

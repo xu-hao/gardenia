@@ -23,8 +23,10 @@ MANAGED_BEGIN = "<!-- gardenia:begin -->"
 MANAGED_END = "<!-- gardenia:end -->"
 
 SUPPORTED_CLIENTS: tuple[str, ...] = ("codex", "claude", "agy")
-PLUGIN_PACKAGES: tuple[str, ...] = ("agrein", "agcoord", "howhard", "agroute")
-CLI_WITH_PLUGINS: tuple[str, ...] = ("howhard", "agroute", "agcoord")
+PLUGIN_SNIPPET_FILENAME = "AGENTS.snippet.md"
+# Tool and plugin names double as path components and ``<!-- <name>:begin -->`` markers.
+ENTRY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+RESERVED_ENTRY_NAMES = frozenset({"gardenia"})
 
 DEFAULT_TIMEOUT_SECONDS = 5.0
 DEFAULT_TMPFS_INODES = 262144
@@ -32,18 +34,42 @@ DEFAULT_TMPFS_INODES = 262144
 
 @dataclass(frozen=True)
 class CliSpec:
-    """Definition of a required host-level Python CLI tool."""
+    """Definition of a managed host-level CLI tool."""
 
-    package: str
+    name: str
     binary: str
     min_version: str
     linux_only: bool = False
+    install_target: str = ""
+
+    @property
+    def target(self) -> str:
+        """Return the ``uv tool install`` / ``pipx install`` argument."""
+
+        return self.install_target or self.name
 
 
-CLI_SPECS: tuple[CliSpec, ...] = (
-    CliSpec(package="howhard", binary="howhard", min_version="6.0.0", linux_only=False),
-    CliSpec(package="agroute", binary="agr", min_version="0.7.0", linux_only=False),
-    CliSpec(package="agcoord", binary="agc", min_version="0.10.0", linux_only=True),
+@dataclass(frozen=True)
+class PluginSpec:
+    """Definition of a managed user-scoped agent client plugin."""
+
+    name: str
+    source: str
+    clients: tuple[str, ...] = SUPPORTED_CLIENTS
+    cli: str | None = None
+
+
+BUILTIN_TOOLS: tuple[CliSpec, ...] = (
+    CliSpec(name="howhard", binary="howhard", min_version="6.0.0", linux_only=False),
+    CliSpec(name="agroute", binary="agr", min_version="0.7.0", linux_only=False),
+    CliSpec(name="agcoord", binary="agc", min_version="0.10.0", linux_only=True),
+)
+
+BUILTIN_PLUGINS: tuple[PluginSpec, ...] = (
+    PluginSpec(name="agrein", source=f"{GITHUB_OWNER}/agrein"),
+    PluginSpec(name="agcoord", source=f"{GITHUB_OWNER}/agcoord", cli="agcoord"),
+    PluginSpec(name="howhard", source=f"{GITHUB_OWNER}/howhard", cli="howhard"),
+    PluginSpec(name="agroute", source=f"{GITHUB_OWNER}/agroute", cli="agroute"),
 )
 
 
