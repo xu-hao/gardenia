@@ -8,3 +8,4 @@ source_suffix = {".md": "markdown"}
 master_doc = "index"
 html_theme = "furo"
 exclude_patterns = ["_build"]
+myst_heading_anchors = 3
