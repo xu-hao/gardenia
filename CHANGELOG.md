@@ -4,6 +4,20 @@ All notable changes to `gardenia` are documented in this file.
 
 ## Unreleased
 
+## 0.2.5 — 2026-11-28
+
+- Fixed `gardenia repos upgrade --no-upgrade-locks` skipping test-virtualenv provisioning
+  for `pyproject.toml` repositories without `uv.lock`, which ran the gate without the
+  project or its test dependencies. The virtualenv is now provisioned whenever the gate
+  runs; only dependency upgrades are disabled (`#33`).
+- `gardenia repos upgrade --no-upgrade-locks` with policy sync now skips the gate and
+  `agc run` when nothing changed (`up_to_date`), or when `docs_exemption` is enabled and
+  every changed file qualifies (`#33`).
+- `gardenia repos upgrade` now commits the changed files to a temporary local candidate
+  branch before running the gate, so gates that require a clean checkout pass. Source-tree
+  changes left by virtualenv setup are discarded before the gate, and changes left by a
+  passing gate are discarded before `--land` publishes (`#33`).
+
 ## 0.2.4 — 2026-11-27
 
 - Raised the minimum required host CLI versions in `gardenia host check`: `howhard` from

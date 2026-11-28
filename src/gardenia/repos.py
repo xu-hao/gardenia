@@ -934,7 +934,7 @@ def _collect_dependency_group_reqs(
     return collected
 
 
-def _build_pyproject_install_args(wt_dir: Path) -> list[str]:
+def _build_pyproject_install_args(wt_dir: Path, *, upgrade: bool = True) -> list[str]:
     pyproject_path = wt_dir / "pyproject.toml"
     try:
         data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
@@ -968,7 +968,59 @@ def _build_pyproject_install_args(wt_dir: Path) -> list[str]:
         args.extend(["-r", "docs/requirements.txt"])
     if not args:
         return []
-    return ["--upgrade", *args]
+    return ["--upgrade", *args] if upgrade else args
+
+
+def _provision_pyproject_venv(
+    wt_dir: Path,
+    *,
+    venv_dir: Path,
+    uv_bin: str | None,
+    upgrade: bool,
+    packages: Sequence[str],
+    gate_env: dict[str, str],
+    upgrade_actions: list[str],
+    upgrade_logs: list[str],
+) -> str | None:
+    """Build the isolated gate virtualenv and activate it in ``gate_env``.
+
+    ``upgrade`` controls only dependency upgrades; provisioning always happens.
+    Returns an error message, or ``None`` on success.
+    """
+
+    venv_python = venv_dir / "bin" / "python"
+    try:
+        install_args = _build_pyproject_install_args(wt_dir, upgrade=upgrade)
+    except GardeniaError as exc:
+        return exc.message
+
+    if uv_bin:
+        create_venv_cmd = [uv_bin, "venv", "--seed", str(venv_dir)]
+        pip_install = [uv_bin, "pip", "install", "--python", str(venv_python)]
+    else:
+        create_venv_cmd = [sys.executable, "-m", "venv", str(venv_dir)]
+        pip_install = [str(venv_python), "-m", "pip", "install"]
+
+    steps = [create_venv_cmd]
+    if install_args:
+        steps.append([*pip_install, *install_args])
+    if upgrade and packages:
+        steps.append([*pip_install, "--upgrade", *packages])
+
+    for step_cmd in steps:
+        step_res = run_cmd(step_cmd, cwd=wt_dir, timeout=UPGRADE_CMD_TIMEOUT_SECONDS, env=gate_env)
+        upgrade_actions.append(" ".join(step_cmd))
+        if step_res.stdout or step_res.stderr:
+            upgrade_logs.append(f"$ {' '.join(step_cmd)}\n{step_res.stdout}{step_res.stderr}".strip())
+        if not step_res.ok:
+            detail = step_res.stderr.strip() or step_res.stdout.strip() or f"exit code {step_res.returncode}"
+            return f"Virtualenv dependency setup failed ({step_cmd[0]}): {detail}"
+
+    venv_bin = str(venv_dir / "bin")
+    existing_path = gate_env.get("PATH", "")
+    gate_env["PATH"] = f"{venv_bin}{os.pathsep}{existing_path}" if existing_path else venv_bin
+    gate_env["VIRTUAL_ENV"] = str(venv_dir)
+    return None
 
 
 def _list_worktree_status_entries(wt_dir: Path, env: Mapping[str, str]) -> list[tuple[str, str]]:
@@ -1031,6 +1083,85 @@ def _clean_untracked_gate_artifacts(
                     break
             except OSError:
                 break
+
+
+def _restore_candidate_checkout(wt_dir: Path, env: Mapping[str, str]) -> None:
+    """Return the disposable worktree to its committed ``HEAD`` without moving any branch.
+
+    Callers must commit intentional changes first; everything uncommitted is discarded
+    (except ignored files).
+    """
+
+    for argv in (["git", "reset", "--quiet"], ["git", "checkout", "--", "."]):
+        run_cmd(argv, cwd=wt_dir, timeout=DEFAULT_TIMEOUT_SECONDS, env=env)
+    _clean_untracked_gate_artifacts(wt_dir, [], env)
+
+
+def _fallback_identity_args(wt_dir: Path, env: Mapping[str, str]) -> list[str]:
+    args: list[str] = []
+    for key, env_var, fallback in (
+        ("user.name", "GIT_AUTHOR_NAME", "gardenia"),
+        ("user.email", "GIT_AUTHOR_EMAIL", "gardenia@localhost"),
+    ):
+        if env.get(env_var):
+            continue
+        res = run_cmd(["git", "config", "--get", key], cwd=wt_dir, timeout=DEFAULT_TIMEOUT_SECONDS, env=env)
+        if not res.ok or not res.stdout.strip():
+            args.extend(["-c", f"{key}={fallback}"])
+    return args
+
+
+def _upgrade_commit_title(packages: Sequence[str]) -> str:
+    pkg_note = f" ({', '.join(packages)})" if packages else ""
+    return f"Gardenia upgrade sweep{pkg_note}"
+
+
+def _commit_candidate_branch(
+    wt_dir: Path,
+    *,
+    repo_root: Path,
+    stamp: str,
+    changed_files: Sequence[str],
+    commit_title: str,
+    env: Mapping[str, str],
+) -> tuple[str | None, str | None]:
+    """Commit only ``changed_files`` onto a new candidate branch inside ``wt_dir``.
+
+    Returns ``(created_branch, error_or_none)``. ``created_branch`` is set whenever the
+    branch exists, even if staging or committing failed, so the caller can delete it.
+    """
+
+    branch_name = _unique_upgrade_branch(repo_root, f"gardenia-upgrade-{stamp}", env)
+    checkout_res = run_cmd(
+        ["git", "checkout", "-b", branch_name],
+        cwd=wt_dir,
+        timeout=DEFAULT_TIMEOUT_SECONDS,
+        env=env,
+    )
+    if not checkout_res.ok:
+        detail = checkout_res.stderr.strip() or checkout_res.stdout.strip()
+        return None, f"git checkout -b {branch_name} failed: {detail}"
+
+    add_res = run_cmd(
+        ["git", "add", "--", *changed_files],
+        cwd=wt_dir,
+        timeout=DEFAULT_TIMEOUT_SECONDS,
+        env=env,
+    )
+    if not add_res.ok:
+        detail = add_res.stderr.strip() or add_res.stdout.strip()
+        return branch_name, f"git add -- ... failed: {detail}"
+
+    commit_res = run_cmd(
+        ["git", *_fallback_identity_args(wt_dir, env), "commit", "-m", commit_title],
+        cwd=wt_dir,
+        timeout=30.0,
+        env=env,
+    )
+    if not commit_res.ok:
+        detail = commit_res.stderr.strip() or commit_res.stdout.strip()
+        return branch_name, f"git commit failed: {detail}"
+    return branch_name, None
 
 
 def _unique_upgrade_branch(repo_root: Path, base_name: str, env: Mapping[str, str]) -> str:
@@ -1268,8 +1399,8 @@ def _plan_single_repo_upgrade(
             steps.append("upgrade_uv_lock")
         if (git_info.root / "Cargo.lock").is_file():
             steps.append("upgrade_cargo_lock")
-        if (git_info.root / "pyproject.toml").is_file() and not (git_info.root / "uv.lock").is_file():
-            steps.append("provision_pyproject_venv")
+    if (git_info.root / "pyproject.toml").is_file() and not (git_info.root / "uv.lock").is_file():
+        steps.append("provision_pyproject_venv")
     use_agc, agc_err = _should_use_agc(profile, cwd=git_info.root, env=env)
     steps.append(f"run_gate:{'agc' if use_agc else 'direct'}:{profile.gate}")
     if land:
@@ -1406,8 +1537,8 @@ def _execute_single_repo_upgrade(
 
         # 3. Optional lockfile / dependency upgrades.
         gate_env = dict(env)
+        uv_bin = shutil.which("uv", path=gate_env.get("PATH"))
         if upgrade_locks:
-            uv_bin = shutil.which("uv", path=gate_env.get("PATH"))
             cargo_bin = shutil.which("cargo", path=gate_env.get("PATH"))
 
             if (wt_dir / "uv.lock").is_file() and uv_bin:
@@ -1449,150 +1580,155 @@ def _execute_single_repo_upgrade(
                         upgrade_actions=upgrade_actions,
                     )
 
+        # Capture intentional changes (policy sync + lock upgrades) BEFORE venv setup or the gate.
+        changed_files = _list_worktree_changed_files(wt_dir, env)
+        commit_title = _upgrade_commit_title(packages)
+
+        # 4. Without lock upgrades, a policy sync that changed nothing (or only
+        #    documentation-exempt files) has nothing for profile.gate to validate.
+        skip_reason: str | None = None
+        if sync_policy and not upgrade_locks:
+            if not changed_files:
+                skip_reason = "up_to_date"
+            elif profile.docs_exemption and qualifies_for_docs_exemption(changed_files):
+                skip_reason = "docs_exemption"
+
+        use_agc = False
+        if skip_reason is not None:
+            upgrade_actions.append(f"skip_gate:{skip_reason}")
+        else:
+            # 5. Provision the test virtualenv, commit the candidate, and run profile.gate.
             if (wt_dir / "pyproject.toml").is_file() and not (wt_dir / "uv.lock").is_file():
-                venv_dir = scratch_dir / "venv"
-                venv_python = venv_dir / "bin" / "python"
-                try:
-                    install_args = _build_pyproject_install_args(wt_dir)
-                except GardeniaError as exc:
+                venv_err = _provision_pyproject_venv(
+                    wt_dir,
+                    venv_dir=scratch_dir / "venv",
+                    uv_bin=uv_bin,
+                    upgrade=upgrade_locks,
+                    packages=packages,
+                    gate_env=gate_env,
+                    upgrade_actions=upgrade_actions,
+                    upgrade_logs=upgrade_logs,
+                )
+                if venv_err:
                     return _error_result(
                         str(repo_root),
-                        exc.message,
+                        venv_err,
                         base_ref=base_ref,
                         gate=profile.gate,
                         upgrade_actions=upgrade_actions,
                     )
 
-                if uv_bin:
-                    create_venv_cmd = [uv_bin, "venv", "--seed", str(venv_dir)]
-                    install_cmd = (
-                        [uv_bin, "pip", "install", "--python", str(venv_python), *install_args]
-                        if install_args
-                        else None
-                    )
-                    pkg_cmd = (
-                        [uv_bin, "pip", "install", "--python", str(venv_python), "--upgrade", *packages]
-                        if packages
-                        else None
-                    )
-                else:
-                    create_venv_cmd = [sys.executable, "-m", "venv", str(venv_dir)]
-                    install_cmd = (
-                        [str(venv_python), "-m", "pip", "install", *install_args]
-                        if install_args
-                        else None
-                    )
-                    pkg_cmd = [str(venv_python), "-m", "pip", "install", "--upgrade", *packages] if packages else None
-
-                steps = [create_venv_cmd, *([install_cmd] if install_cmd else []), *([pkg_cmd] if pkg_cmd else [])]
-                for step_cmd in steps:
-                    step_res = run_cmd(step_cmd, cwd=wt_dir, timeout=UPGRADE_CMD_TIMEOUT_SECONDS, env=gate_env)
-                    upgrade_actions.append(" ".join(step_cmd))
-                    if step_res.stdout or step_res.stderr:
-                        upgrade_logs.append(f"$ {' '.join(step_cmd)}\n{step_res.stdout}{step_res.stderr}".strip())
-                    if not step_res.ok:
-                        detail = step_res.stderr.strip() or step_res.stdout.strip() or f"exit code {step_res.returncode}"
-                        return _error_result(
-                            str(repo_root),
-                            f"Virtualenv dependency setup failed ({step_cmd[0]}): {detail}",
-                            base_ref=base_ref,
-                            gate=profile.gate,
-                            upgrade_actions=upgrade_actions,
-                        )
-
-                venv_bin = str(venv_dir / "bin")
-                existing_path = gate_env.get("PATH", "")
-                gate_env["PATH"] = f"{venv_bin}{os.pathsep}{existing_path}" if existing_path else venv_bin
-                gate_env["VIRTUAL_ENV"] = str(venv_dir)
-
-        # Capture intentional changes (policy sync + lock/dependency upgrades) BEFORE running profile.gate.
-        changed_files = _list_worktree_changed_files(wt_dir, env)
-
-        # 4. Decide agcoord policy and execute profile.gate inside wt_dir.
-        use_agc, agc_err = _should_use_agc(profile, cwd=wt_dir, env=gate_env)
-        if agc_err:
-            return _error_result(
-                str(repo_root),
-                agc_err,
-                base_ref=base_ref,
-                used_agcoord=False,
-                gate=profile.gate,
-                changed_files=changed_files,
-                upgrade_actions=upgrade_actions,
-            )
-
-        if use_agc:
-            gate_cmd = [
-                "agc",
-                "run",
-                "--label",
-                f"upgrade gate ({repo_name})",
-                *_build_agc_resource_args(profile),
-                "--",
-                "bash",
-                "-lc",
-                profile.gate,
-            ]
-        else:
-            bash_exe = shutil.which("bash", path=gate_env.get("PATH")) or shutil.which("bash") or "/bin/bash"
-            gate_cmd = [bash_exe, "-lc", profile.gate]
-
-        gate_res = run_cmd(gate_cmd, cwd=wt_dir, timeout=gate_timeout, env=gate_env)
-
-        # 5. Classify outcome.
-        if not gate_res.ok:
-            log_path = _write_failure_log(
-                log_dir=resolved_log_dir,
-                repo_name=repo_name,
-                stamp=stamp,
-                repo_root=repo_root,
-                base_ref=base_ref,
-                gate_cmd=gate_cmd,
-                returncode=gate_res.returncode,
-                stdout=gate_res.stdout,
-                stderr=gate_res.stderr,
-                upgrade_logs=upgrade_logs,
-            )
-            combined_output = "\n".join(part for part in (gate_res.stdout, gate_res.stderr) if part)
-            log_excerpt = _format_log_excerpt(combined_output)
-
-            issue_url: str | None = None
-            issue_number: int | None = None
-            issue_created: bool | None = None
-            issue_error: str | None = None
-            if file_issues:
-                issue_url, issue_number, issue_created, issue_error = _file_or_reuse_failure_issue(
-                    wt_dir=wt_dir,
-                    repo_name=repo_name,
+            # Decide agcoord policy for profile.gate.
+            use_agc, agc_err = _should_use_agc(profile, cwd=wt_dir, env=gate_env)
+            if agc_err:
+                return _error_result(
+                    str(repo_root),
+                    agc_err,
                     base_ref=base_ref,
-                    packages=packages,
+                    used_agcoord=False,
                     gate=profile.gate,
-                    returncode=gate_res.returncode,
-                    log_path=log_path,
-                    log_excerpt=log_excerpt,
-                    env=env,
+                    changed_files=changed_files,
+                    upgrade_actions=upgrade_actions,
                 )
 
-            return {
-                "path": str(repo_root),
-                "name": repo_name,
-                "status": "gate_failed",
-                "base_ref": base_ref,
-                "used_agcoord": use_agc,
-                "gate": profile.gate,
-                "returncode": gate_res.returncode,
-                "changed_files": changed_files,
-                "upgrade_actions": upgrade_actions,
-                "log_path": str(log_path),
-                "log_excerpt": log_excerpt,
-                "issue_url": issue_url,
-                "issue_number": issue_number,
-                "issue_created": issue_created,
-                "pr_url": None,
-                "pr_number": None,
-                "land_method": None,
-                "error": issue_error,
-            }
+            # Commit the candidate first so the gate sees a clean checkout, and drop
+            # anything virtualenv setup wrote into the source tree.
+            if changed_files:
+                created_branch, commit_err = _commit_candidate_branch(
+                    wt_dir,
+                    repo_root=repo_root,
+                    stamp=stamp,
+                    changed_files=changed_files,
+                    commit_title=commit_title,
+                    env=env,
+                )
+                if commit_err:
+                    return _error_result(
+                        str(repo_root),
+                        commit_err,
+                        base_ref=base_ref,
+                        used_agcoord=use_agc,
+                        gate=profile.gate,
+                        changed_files=changed_files,
+                        upgrade_actions=upgrade_actions,
+                    )
+            _restore_candidate_checkout(wt_dir, env)
+
+            if use_agc:
+                gate_cmd = [
+                    "agc",
+                    "run",
+                    "--label",
+                    f"upgrade gate ({repo_name})",
+                    *_build_agc_resource_args(profile),
+                    "--",
+                    "bash",
+                    "-lc",
+                    profile.gate,
+                ]
+            else:
+                bash_exe = shutil.which("bash", path=gate_env.get("PATH")) or shutil.which("bash") or "/bin/bash"
+                gate_cmd = [bash_exe, "-lc", profile.gate]
+
+            gate_res = run_cmd(gate_cmd, cwd=wt_dir, timeout=gate_timeout, env=gate_env)
+
+            # Classify outcome.
+            if not gate_res.ok:
+                log_path = _write_failure_log(
+                    log_dir=resolved_log_dir,
+                    repo_name=repo_name,
+                    stamp=stamp,
+                    repo_root=repo_root,
+                    base_ref=base_ref,
+                    gate_cmd=gate_cmd,
+                    returncode=gate_res.returncode,
+                    stdout=gate_res.stdout,
+                    stderr=gate_res.stderr,
+                    upgrade_logs=upgrade_logs,
+                )
+                combined_output = "\n".join(part for part in (gate_res.stdout, gate_res.stderr) if part)
+                log_excerpt = _format_log_excerpt(combined_output)
+
+                issue_url: str | None = None
+                issue_number: int | None = None
+                issue_created: bool | None = None
+                issue_error: str | None = None
+                if file_issues:
+                    issue_url, issue_number, issue_created, issue_error = _file_or_reuse_failure_issue(
+                        wt_dir=wt_dir,
+                        repo_name=repo_name,
+                        base_ref=base_ref,
+                        packages=packages,
+                        gate=profile.gate,
+                        returncode=gate_res.returncode,
+                        log_path=log_path,
+                        log_excerpt=log_excerpt,
+                        env=env,
+                    )
+
+                return {
+                    "path": str(repo_root),
+                    "name": repo_name,
+                    "status": "gate_failed",
+                    "base_ref": base_ref,
+                    "used_agcoord": use_agc,
+                    "gate": profile.gate,
+                    "returncode": gate_res.returncode,
+                    "changed_files": changed_files,
+                    "upgrade_actions": upgrade_actions,
+                    "log_path": str(log_path),
+                    "log_excerpt": log_excerpt,
+                    "issue_url": issue_url,
+                    "issue_number": issue_number,
+                    "issue_created": issue_created,
+                    "pr_url": None,
+                    "pr_number": None,
+                    "land_method": None,
+                    "error": issue_error,
+                }
+
+            # Discard anything the passing gate wrote so only the candidate commit can land.
+            _restore_candidate_checkout(wt_dir, env)
 
         if not changed_files:
             return {
@@ -1660,66 +1796,27 @@ def _execute_single_repo_upgrade(
                 upgrade_actions=upgrade_actions,
             )
 
-        # Clean any untracked gate artifacts before creating the --land branch/commit.
-        _clean_untracked_gate_artifacts(wt_dir, changed_files, env)
-
-        branch_name = _unique_upgrade_branch(repo_root, f"gardenia-upgrade-{stamp}", env)
-        checkout_res = run_cmd(
-            ["git", "checkout", "-b", branch_name],
-            cwd=wt_dir,
-            timeout=DEFAULT_TIMEOUT_SECONDS,
-            env=env,
-        )
-        if not checkout_res.ok:
-            detail = checkout_res.stderr.strip() or checkout_res.stdout.strip()
-            return _error_result(
-                str(repo_root),
-                f"git checkout -b {branch_name} failed: {detail}",
-                base_ref=base_ref,
-                used_agcoord=use_agc,
-                gate=profile.gate,
+        # Reuse the pre-gate candidate commit; commit now only if the gate was skipped.
+        if created_branch is None:
+            created_branch, commit_err = _commit_candidate_branch(
+                wt_dir,
+                repo_root=repo_root,
+                stamp=stamp,
                 changed_files=changed_files,
-                upgrade_actions=upgrade_actions,
+                commit_title=commit_title,
+                env=env,
             )
-        created_branch = branch_name
-
-        add_stage_res = run_cmd(
-            ["git", "add", "--", *changed_files],
-            cwd=wt_dir,
-            timeout=DEFAULT_TIMEOUT_SECONDS,
-            env=env,
-        )
-        if not add_stage_res.ok:
-            detail = add_stage_res.stderr.strip() or add_stage_res.stdout.strip()
-            return _error_result(
-                str(repo_root),
-                f"git add -- ... failed: {detail}",
-                base_ref=base_ref,
-                used_agcoord=use_agc,
-                gate=profile.gate,
-                changed_files=changed_files,
-                upgrade_actions=upgrade_actions,
-            )
-
-        pkg_note = f" ({', '.join(packages)})" if packages else ""
-        commit_title = f"Gardenia upgrade sweep{pkg_note}"
-        commit_res = run_cmd(
-            ["git", "commit", "-m", commit_title],
-            cwd=wt_dir,
-            timeout=30.0,
-            env=env,
-        )
-        if not commit_res.ok:
-            detail = commit_res.stderr.strip() or commit_res.stdout.strip()
-            return _error_result(
-                str(repo_root),
-                f"git commit failed: {detail}",
-                base_ref=base_ref,
-                used_agcoord=use_agc,
-                gate=profile.gate,
-                changed_files=changed_files,
-                upgrade_actions=upgrade_actions,
-            )
+            if commit_err or created_branch is None:
+                return _error_result(
+                    str(repo_root),
+                    commit_err or "Failed to create the candidate branch.",
+                    base_ref=base_ref,
+                    used_agcoord=use_agc,
+                    gate=profile.gate,
+                    changed_files=changed_files,
+                    upgrade_actions=upgrade_actions,
+                )
+        branch_name = created_branch
 
         push_res = run_cmd(
             ["git", "push", "-u", "origin", branch_name],
