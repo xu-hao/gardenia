@@ -4,6 +4,29 @@ All notable changes to `gardenia` are documented in this file.
 
 ## Unreleased
 
+- **Breaking template change:** the `<!-- gardenia:begin --> ... <!-- gardenia:end -->`
+  block is now compact. For the default profile it drops from 59 to 17 lines and keeps
+  only repository policy and profile parameters: issue-first tracking, `/var/tmp`
+  worktrees with a read-only primary checkout, complete check logs, behavioral testing,
+  the documentation-only exemption, the gate command with integer byte `agc` claims,
+  hermetic tests, no references to private projects or other repositories' issues, and
+  per-operation approval for PyPI and live changes. Step-by-step `agr`, `howhard`, and
+  `agc` CLI details now come only from each tool's installed skill. Run
+  `gardenia repo init` or `gardenia repos upgrade` to refresh existing repositories
+  (`#35`).
+- `gardenia repo init` and `gardenia repos upgrade` now stamp a sibling block for each
+  active built-in plugin: `agrein` always, `agroute` or `howhard` according to `routing`,
+  and `agcoord` unless `agcoord = "none"`. Each block comes from the installed plugin's
+  `AGENTS.snippet.md`, or from a verbatim copy shipped inside `gardenia` when no installed
+  plugin provides one, so offline hosts stamp a deterministic block. Built-in and new tool
+  blocks are inserted right after the `gardenia` block instead of at the end of the file,
+  and `repo init` removes the block of a built-in plugin the profile no longer activates
+  (`#35`).
+- `gardenia repo check` still reads repository files only. It warns when an active
+  built-in block is missing or a deactivated one remains, while `gardenia check` and
+  `gardenia repos check` also flag built-in blocks that drift from the snippet this host
+  would stamp. `gardenia repo render --json` and `gardenia repo init --json` list the
+  expected `sibling_blocks` (`#35`).
 - Added user-configured CLI tools and agent plugins, including private ones, through a host
   file at `${XDG_CONFIG_HOME:-~/.config}/gardenia/config.toml` (or
   `$GARDENIA_HOST_CONFIG`). `[[tools]]` and `[[plugins]]` entries merge over the built-in

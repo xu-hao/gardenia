@@ -33,6 +33,8 @@ GIB = 1024 * 1024 * 1024
 
 ALLOWED_ROUTING = ("agroute", "howhard", "none")
 ALLOWED_AGCOORD = ("auto", "required", "none")
+# Built-in plugins that may own a sibling ``AGENTS.md`` block, in stamping order.
+BUILTIN_SIBLING_TOOLS = ("agrein", "agroute", "howhard", "agcoord")
 
 CONFIG_KEYS = frozenset(
     {
@@ -450,127 +452,84 @@ def _format_agc_flags(profile: RepoProfile) -> str:
     return " ".join(parts)
 
 
+def builtin_sibling_tools(profile: RepoProfile) -> tuple[str, ...]:
+    """Return the built-in plugins whose sibling block the profile activates.
+
+    ``agrein`` is always active, ``routing`` selects ``agroute`` or ``howhard``, and an
+    ``agcoord`` mode other than ``"none"`` selects ``agcoord``.
+    """
+
+    names = ["agrein"]
+    if profile.routing in ("agroute", "howhard"):
+        names.append(profile.routing)
+    if profile.agcoord != "none":
+        names.append("agcoord")
+    return tuple(names)
+
+
+def sibling_block_names(profile: RepoProfile) -> tuple[str, ...]:
+    """Return every expected sibling block: active built-ins first, then declared ``tools``."""
+
+    return tuple(dict.fromkeys((*builtin_sibling_tools(profile), *profile.tools)))
+
+
+def inactive_builtin_tools(profile: RepoProfile) -> tuple[str, ...]:
+    """Return built-in plugin names whose sibling block the profile does not expect."""
+
+    expected = set(sibling_block_names(profile))
+    return tuple(name for name in BUILTIN_SIBLING_TOOLS if name not in expected)
+
+
 def render_managed_block(profile: RepoProfile) -> str:
-    """Render the canonical delimited ``<!-- gardenia:begin --> ... <!-- gardenia:end -->`` block."""
+    """Render the canonical delimited ``<!-- gardenia:begin --> ... <!-- gardenia:end -->`` block.
+
+    The block holds only repository policy and concrete profile parameters. Tool usage
+    instructions live in sibling blocks stamped from each plugin's ``AGENTS.snippet.md``.
+    """
 
     profile.validate()
-    agc_flags = _format_agc_flags(profile)
+    gate = profile.gate
     bullets: list[str] = [
         (
-            "- Use the installed `agrein` skills: `ticket-delivery` before changing code, docs,\n"
-            "  config, infrastructure, or live state; `epic-queue` when decomposing multi-ticket\n"
-            "  work or coordinating subagent workers; `bug-investigation` before fixing defects or\n"
-            "  failing checks; and `owner-escalation` for unsettled product/policy rulings, live\n"
-            "  operation approvals, and decision handoffs."
-        )
+            "- File an issue (`#N — one sentence describing the work`) for each code, test, docs, or packaging\n"
+            "  change; work in an issue-named `/var/tmp` worktree from `origin/main`, keep the primary checkout\n"
+            "  read-only, and keep check logs complete (never truncated)."
+        ),
+        (
+            "- Verify behavior at public boundaries with focused tests (bug fixes start with a failing one) and\n"
+            "  add canonical docs plus a `CHANGELOG.md` entry for user-facing changes. Tests stop and remove all\n"
+            "  they create and never touch `~/.codex`, `~/.claude`, `~/.gemini`, `~/.config`, or `~/.local`."
+        ),
     ]
-
-    if profile.routing == "agroute":
-        bullets.append(
-            "- Coordinate ticket work by delegating each authorized ticket to a worker selected with\n"
-            "  the installed `agroute` and `howhard` skills; an assigned leaf worker implements its\n"
-            "  ticket directly without recursively delegating it (report a capability gap first if\n"
-            "  `agroute` or worker delegation is unavailable on the host):\n"
-            "  1. Inspect or refresh live agent quota state with `agr usage`.\n"
-            "  2. Emit eligible provider-qualified candidates for this host with\n"
-            "     `agr candidates --host <codex|claude|agy> --output /tmp/TASK-candidates.json --json`.\n"
-            "     If `price_request` is non-null, look up official first-party provider pricing (or\n"
-            "     classify internal harness models as `\"alias\"` or `\"unlisted\"`), run\n"
-            "     `agr prices resolve --file /tmp/TASK-prices.json --json`, and re-emit candidates once.\n"
-            "  3. Select a route with `howhard` (`context --host <codex|claude|agy> --auto-decide`, or\n"
-            "     `context`/`retrieve`/`decide` evaluating `baseline_request` in an independent stateless\n"
-            "     context only when non-null, or `pick --host <codex|claude|agy>`), then resolve the\n"
-            "     execution plan with\n"
-            "     `agr plan --host <codex|claude|agy> --decision /tmp/TASK-decision.json --json`.\n"
-            "  4. Honor `needs_review`. Execute native plans (`target_agent == host_agent`) with the\n"
-            "     host's native subagent tool and cross-agent plans (`target_agent != host_agent`) with\n"
-            "     the returned non-interactive CLI command.\n"
-            "  5. Record the actual outcome and measured usage in `howhard` following the plan's\n"
-            "     `feedback` block (`matched_receipt` or `raw_native`), then update `howhard` memory."
-        )
-    elif profile.routing == "howhard":
-        bullets.append(
-            "- Coordinate ticket work by delegating each authorized ticket to a native worker\n"
-            "  selected with the installed `howhard` skill (`context --host <codex|claude|agy> --auto-decide`,\n"
-            "  or `context`/`retrieve`/`decide` evaluating `baseline_request` in an independent stateless\n"
-            "  context only when non-null, or `pick --host <codex|claude|agy>`), then record the actual\n"
-            "  outcome and measured usage in `howhard` (`observe`, `usage attach`) and update `howhard`\n"
-            "  memory; an assigned leaf worker implements its ticket directly without recursively\n"
-            "  delegating it."
-        )
-    else:
-        bullets.append(
-            "- An assigned leaf worker implements its ticket directly without recursively delegating it."
-        )
-
-    bullets.append(
-        "- Track every code, test, documentation, or packaging change with a descriptive issue\n"
-        "  (`#N — one sentence describing the work`). Do not file an issue solely for\n"
-        "  machine-local installation, deployment, configuration, service lifecycle, or other\n"
-        "  operator state unless it also requires a repository change or the user requests one."
-    )
-    bullets.append(
-        "- Develop and validate only in an issue-specific Git worktree branched from\n"
-        "  `origin/main`. Preserve unrelated work and keep the primary checkout read-only during\n"
-        "  development."
-    )
-    bullets.append(
-        "- Verify behavior at public boundaries. Start bug fixes with a failing behavioral test;\n"
-        "  accompany runtime changes with focused tests, affected canonical documentation, and a\n"
-        "  `CHANGELOG.md` entry when the change is user-facing."
-    )
 
     if profile.docs_exemption:
         bullets.append(
-            "- A documentation-only change needs no tests or AGCoord gate. It qualifies only when\n"
-            "  every changed path is `README.md`, `CHANGELOG.md`, `AGENTS.md`, Markdown below\n"
-            "  `docs/`, or a `.png` or `.svg` image below `docs/assets/` whose provenance is\n"
-            "  recorded in `docs/assets/README.md`. Verify the exact pull-request file list and\n"
-            "  diff, then merge it through the forge; the issue, worktree, branch, pull-request,\n"
-            "  and no-direct-target-push rules still apply."
+            "- Docs-only changes (every path `README.md`, `CHANGELOG.md`, `AGENTS.md`, Markdown in `docs/`, or\n"
+            "  a `docs/assets/` `.png`/`.svg` with provenance in `docs/assets/README.md`) skip tests and the\n"
+            "  gate; verify the PR file list and diff, then merge via the forge."
         )
 
-    if profile.agcoord in ("required", "auto"):
-        header = (
-            "- Route checks and pull-request landing through the local `agcoord` broker with\n"
-            "  integer byte memory claims:\n"
-            if profile.agcoord == "required"
-            else "- On Linux hosts with `agcoord` (`agc`), route checks and pull-request landing through\n"
-            "  the local coordinator with integer byte memory claims:\n"
-        )
-        trailer = (
-            ""
-            if profile.agcoord == "required"
-            else (
-                " On hosts without `agc`, run\n"
-                f"  `{profile.gate}` directly and merge through the forge after checks pass."
-            )
-        )
-        bullets.append(
-            f"{header}"
-            f'  - Check: `agc run --label "<short plain-English summary>" {agc_flags} -- {profile.gate}`\n'
-            f'  - Land: `agc land <pr> --label "land #<pr> <short summary>" {agc_flags} -- {profile.gate}`\n'
-            "  Give every job a short plain-English `--label` for humans in `agc list` and `agc tui`\n"
-            '  (lead with what is checked or landed; omit commit SHAs, branch names, `"pre-land"` tags,\n'
-            "  and file paths).\n"
-            "  Never submit coordinated work recursively inside an admitted job, and never bypass or\n"
-            f"  separate the gate verdict from publication.{trailer}"
-        )
+    if profile.agcoord == "none":
+        bullets.append(f"- Run `{gate}` before every merge, and merge via the forge only after it passes.")
     else:
-        bullets.append(
-            f"- Run `{profile.gate}` to validate every change before opening or merging a pull\n"
-            "  request, and never push directly to `main`."
-        )
+        claims = f"`{_format_agc_flags(profile)} -- {gate}`"
+        if profile.agcoord == "required":
+            bullets.append(f"- Gate only through `agc run` / `agc land <pr>`, passing\n  {claims}.")
+        else:
+            bullets.append(
+                "- Gate through `agc run` / `agc land <pr>` where `agc` is available, passing\n"
+                f"  {claims}; elsewhere,\n"
+                f"  run `{gate}` and merge via the forge after it passes."
+            )
 
-    bullets.append(
-        "- Tests must own and stop every process, repository, and temporary directory they\n"
-        "  create, and must never inspect or mutate real host state (`~/.codex`, `~/.claude`,\n"
-        "  `~/.gemini`, `~/.config`, or `~/.local`)."
-    )
-    bullets.append(
-        "- Never upload a distribution to PyPI or modify live host/production state unless the\n"
-        "  owner explicitly authorizes that exact operation. Permission to implement, test,\n"
-        "  commit, push, merge, tag, or create a GitHub release does not authorize a PyPI upload."
+    bullets.extend(
+        [
+            (
+                "- Never put private project names, machine-local paths, or other repositories' issue links in\n"
+                "  tracked files, commits, or pull requests."
+            ),
+            "- PyPI uploads and live host or production changes need explicit owner approval per operation.",
+        ]
     )
 
     body = "\n".join(bullets)
@@ -672,17 +631,46 @@ def _malformed_sibling_error(name: str) -> GardeniaError:
     )
 
 
-def apply_sibling_block(existing: str, name: str, body: str) -> str:
-    """Idempotently insert or replace ONLY the ``<name>`` sibling block."""
+def apply_sibling_block(existing: str, name: str, body: str, *, after: str | None = None) -> str:
+    """Idempotently insert or replace ONLY the ``<name>`` sibling block.
+
+    An existing block is replaced in place. A new block goes right after the ``after``
+    block's end marker (``"gardenia"`` names the managed block) when that block exists,
+    and at the end of the file otherwise.
+    """
 
     extracted, malformed = extract_sibling_block(existing, name)
     if malformed:
         raise _malformed_sibling_error(name)
     block = render_sibling_block(name, body)
+    if extracted is not None:
+        begin_idx = existing.index(extracted)
+        return existing[:begin_idx] + block + existing[begin_idx + len(extracted) :]
+    if after is not None:
+        anchor_end = MANAGED_END if after == "gardenia" else block_markers(after)[1]
+        if existing.count(anchor_end) == 1:
+            end_idx = existing.index(anchor_end) + len(anchor_end)
+            rest = existing[end_idx:]
+            return existing[:end_idx] + "\n\n" + block + (rest if rest else "\n")
+    return _append_block(existing, block)
+
+
+def remove_sibling_block(existing: str, name: str) -> str:
+    """Remove ONLY the ``<name>`` sibling block and the blank line that separated it."""
+
+    extracted, malformed = extract_sibling_block(existing, name)
+    if malformed:
+        raise _malformed_sibling_error(name)
     if extracted is None:
-        return _append_block(existing, block)
+        return existing
     begin_idx = existing.index(extracted)
-    return existing[:begin_idx] + block + existing[begin_idx + len(extracted) :]
+    before = existing[:begin_idx]
+    after = existing[begin_idx + len(extracted) :]
+    if after.startswith("\n"):
+        after = after[1:]
+    if before.endswith("\n\n") and (not after or after.startswith("\n")):
+        before = before[:-1]
+    return before + after
 
 
 def apply_managed_block(existing: str | None, block: str) -> str:
@@ -946,26 +934,57 @@ def _check_tracked_agents_md(
     return True
 
 
-def _check_sibling_blocks(sibling_blocks: Mapping[str, Mapping[str, bool]], findings: list[Finding]) -> None:
-    """Require one well-formed sibling block per declared tool, using repository files only."""
+def _check_sibling_blocks(
+    sibling_blocks: Mapping[str, Mapping[str, bool]],
+    profile: RepoProfile,
+    agents_text: str,
+    findings: list[Finding],
+) -> None:
+    """Validate sibling blocks from repository files only, never reading host plugin caches.
+
+    A missing block for a declared tool is an error because only a host with the plugin can
+    stamp it; a missing built-in block is a warning because ``repo init`` can always stamp
+    the built-in copy offline. A leftover block for an inactive built-in is a warning.
+    """
 
     for name, state in sibling_blocks.items():
         begin, end = block_markers(name)
+        severity = "error"
         if state["malformed"]:
             message = f"AGENTS.md has malformed '{begin}' / '{end}' markers."
             remediation = "Repair the marker pair in AGENTS.md, then run: gardenia repo init"
-        elif not state["present"]:
+        elif state["present"]:
+            continue
+        elif name in profile.tools:
             message = f"AGENTS.md is missing the '{begin}' / '{end}' block for declared tool '{name}'."
             remediation = "gardenia repo init  # on a host with the plugin installed"
         else:
+            severity = "warning"
+            message = f"AGENTS.md is missing the '{begin}' / '{end}' block for built-in plugin '{name}'."
+            remediation = "gardenia repo init"
+        findings.append(
+            Finding(
+                scope="repo",
+                severity=severity,
+                component=f"agents-md:{name}",
+                message=message,
+                remediation=remediation,
+            )
+        )
+
+    for name in inactive_builtin_tools(profile):
+        if not any(marker in agents_text for marker in block_markers(name)):
             continue
         findings.append(
             Finding(
                 scope="repo",
-                severity="error",
+                severity="warning",
                 component=f"agents-md:{name}",
-                message=message,
-                remediation=remediation,
+                message=(
+                    f"AGENTS.md still has '{name}' block markers, but the repository profile does not "
+                    f"activate built-in plugin '{name}'."
+                ),
+                remediation="gardenia repo init",
             )
         )
 
@@ -975,7 +994,7 @@ def _check_stealth_markers(agents_text: str, profile: RepoProfile, findings: lis
 
     present = [
         name
-        for name in ("gardenia", *profile.tools)
+        for name in ("gardenia", *sibling_block_names(profile))
         if any(marker in agents_text for marker in block_markers(name))
     ]
     if present:
@@ -1062,7 +1081,7 @@ def check_repo(
     extracted_block, block_malformed = extract_managed_block(agents_text) if agents_exists else (None, False)
     in_sync: bool | None = None
     sibling_blocks: dict[str, dict[str, bool]] = {}
-    for name in profile.tools:
+    for name in sibling_block_names(profile):
         sibling, sibling_malformed = extract_sibling_block(agents_text, name)
         sibling_blocks[name] = {"present": sibling is not None, "malformed": sibling_malformed}
 
@@ -1077,7 +1096,7 @@ def check_repo(
             findings=findings,
         )
         if agents_exists:
-            _check_sibling_blocks(sibling_blocks, findings)
+            _check_sibling_blocks(sibling_blocks, profile, agents_text, findings)
 
     lower_agents = agents_text.lower()
     layers_referenced = {
@@ -1200,6 +1219,7 @@ def render_repo(
         "config_source": config_source,
         "profile": profile.to_dict(),
         "managed_block": block,
+        "sibling_blocks": list(sibling_block_names(profile)),
     }
 
 
@@ -1223,26 +1243,34 @@ def _plan_sibling_blocks(
     actions: list[PlannedAction],
     warnings: list[str],
     text: str,
-    tools: tuple[str, ...],
+    profile: RepoProfile,
     *,
     path: Path,
     env: Mapping[str, str],
 ) -> tuple[str, list[str]]:
-    """Stamp sibling blocks from resolved plugin snippets, preserving unresolved ones."""
+    """Stamp every expected sibling block and drop blocks of inactive built-in plugins.
 
-    # Host state is consulted only when the profile declares tools.
-    from gardenia.host import resolve_tool_snippets
+    Snippets resolve from installed plugin roots first; built-in plugins fall back to the
+    copy shipped with ``gardenia``. Unresolved blocks are preserved unchanged.
+    """
 
-    for name in tools:
+    names = sibling_block_names(profile)
+    stale = inactive_builtin_tools(profile)
+    for name in (*names, *stale):
         if extract_sibling_block(text, name)[1]:
             raise _malformed_sibling_error(name)
 
-    resolutions = resolve_tool_snippets(tools, env=env)
+    from gardenia.host import resolve_tool_snippets
+
+    resolutions = resolve_tool_snippets(names, env=env)
     unresolved: list[str] = []
-    for name in tools:
+    anchor = "gardenia"
+    for name in names:
         resolution = resolutions[name]
         component = f"agents-md:{name}"
         if resolution.body is None:
+            if extract_sibling_block(text, name)[0] is not None:
+                anchor = name
             unresolved.append(name)
             message = (
                 f"Could not resolve {PLUGIN_SNIPPET_FILENAME} for '{name}' ({resolution.error}); "
@@ -1253,7 +1281,8 @@ def _plan_sibling_blocks(
                 PlannedAction(kind="skip", component=component, description=message, path=str(path), status="skipped")
             )
             continue
-        updated = apply_sibling_block(text, name, resolution.body)
+        updated = apply_sibling_block(text, name, resolution.body, after=anchor)
+        anchor = name
         if updated == text:
             actions.append(
                 PlannedAction(
@@ -1265,14 +1294,29 @@ def _plan_sibling_blocks(
                 )
             )
         else:
+            source = resolution.path or f"the built-in gardenia copy of {PLUGIN_SNIPPET_FILENAME}"
             actions.append(
                 PlannedAction(
                     kind="write_file",
                     component=component,
-                    description=f"Update AGENTS.md '{name}' block from {resolution.path}.",
+                    description=f"Update AGENTS.md '{name}' block from {source}.",
                     path=str(path),
                 )
             )
+        text = updated
+
+    for name in stale:
+        updated = remove_sibling_block(text, name)
+        if updated == text:
+            continue
+        actions.append(
+            PlannedAction(
+                kind="write_file",
+                component=f"agents-md:{name}",
+                description=f"Remove AGENTS.md '{name}' block; the profile does not activate built-in plugin '{name}'.",
+                path=str(path),
+            )
+        )
         text = updated
     return text, unresolved
 
@@ -1439,15 +1483,14 @@ def init_repo(
             created=existing_agents is None,
             path=agents_path,
         )
-        if profile.tools:
-            updated_agents, unresolved_tools = _plan_sibling_blocks(
-                actions,
-                warnings,
-                updated_agents,
-                profile.tools,
-                path=agents_path,
-                env=effective_env,
-            )
+        updated_agents, unresolved_tools = _plan_sibling_blocks(
+            actions,
+            warnings,
+            updated_agents,
+            profile,
+            path=agents_path,
+            env=effective_env,
+        )
 
         # 2. CLAUDE.md -> AGENTS.md symlink.
         create_symlink, replace_symlink = _plan_claude_symlink(
@@ -1567,6 +1610,7 @@ def init_repo(
         "is_linked_worktree": git_info.is_linked_worktree,
         "profile": profile.to_dict(),
         "managed_block": block,
+        "sibling_blocks": [] if stealth_active else list(sibling_block_names(profile)),
         "stealth": stealth_active,
         "unresolved_tools": unresolved_tools,
         "warnings": warnings,

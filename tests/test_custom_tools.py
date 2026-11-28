@@ -33,7 +33,15 @@ from gardenia.host import (
     setup_host,
 )
 from gardenia.models import BUILTIN_PLUGINS, BUILTIN_TOOLS, MANAGED_BEGIN, MANAGED_END, GardeniaError
-from gardenia.repo import apply_sibling_block, check_repo, extract_sibling_block, init_repo, normalize_snippet
+from gardenia.repo import (
+    apply_sibling_block,
+    check_repo,
+    extract_sibling_block,
+    init_repo,
+    normalize_snippet,
+    remove_sibling_block,
+)
+from gardenia.snippets import BUILTIN_SNIPPETS
 
 BEGIN = "<!-- hotgate:begin -->"
 END = "<!-- hotgate:end -->"
@@ -304,6 +312,15 @@ def test_invalid_host_config_stops_host_commands_before_mutation(tmp_path: Path)
     assert not uv_log.exists()
 
 
+def test_invalid_host_config_stops_repo_init_before_writing_builtin_blocks(tmp_path: Path) -> None:
+    env, _, _ = make_isolated_env(tmp_path)
+    repo = init_git_repo(tmp_path / "repo", env)
+    _write_config(env, "extra = 1\n")
+    data = _cli_json(["repo", "init", "--repo", str(repo), "--no-register"], cwd=tmp_path, env=env, expect_exit=2)
+    assert "unknown key(s): extra" in data["error"]
+    assert not (repo / "AGENTS.md").exists() and not (repo / "CLAUDE.md").exists()
+
+
 # ---------------------------------------------------------------------------
 # host setup / host check
 # ---------------------------------------------------------------------------
@@ -477,6 +494,31 @@ def test_sibling_block_upsert_is_idempotent_and_preserves_surroundings() -> None
     assert extract_sibling_block(updated, "hotgate") == (f"{BEGIN}\n- two\n{END}", False)
 
 
+def test_new_sibling_block_is_inserted_after_its_anchor_block() -> None:
+    managed = f"{MANAGED_BEGIN}\n- managed\n{MANAGED_END}"
+    original = f"# Title\n\n{managed}\n\nProject notes.\n"
+    first = apply_sibling_block(original, "agrein", "- rein", after="gardenia")
+    assert first == f"# Title\n\n{managed}\n\n<!-- agrein:begin -->\n- rein\n<!-- agrein:end -->\n\nProject notes.\n"
+    second = apply_sibling_block(first, "hotgate", "- one", after="agrein")
+    assert second == first.replace("<!-- agrein:end -->\n", f"<!-- agrein:end -->\n\n{BEGIN}\n- one\n{END}\n")
+    # A missing anchor falls back to appending at the end of the file.
+    assert apply_sibling_block(original, "hotgate", "- one", after="agroute").endswith(f"\n{BEGIN}\n- one\n{END}\n")
+    assert apply_sibling_block(managed, "hotgate", "- one", after="gardenia") == f"{managed}\n\n{BEGIN}\n- one\n{END}\n"
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (f"A\n\n{BEGIN}\nx\n{END}\n", "A\n"),
+        (f"A\n\n{BEGIN}\nx\n{END}\n\nB\n", "A\n\nB\n"),
+        (f"A\n{BEGIN}\nx\n{END}\nB\n", "A\nB\n"),
+        ("A\n", "A\n"),
+    ],
+)
+def test_sibling_block_removal_keeps_surrounding_spacing(before: str, after: str) -> None:
+    assert remove_sibling_block(before, "hotgate") == after
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -493,6 +535,8 @@ def test_malformed_or_overlapping_sibling_blocks_are_detected(text: str) -> None
     assert extract_sibling_block(text, "hotgate") == (None, True)
     with pytest.raises(GardeniaError):
         apply_sibling_block(text, "hotgate", "- new")
+    with pytest.raises(GardeniaError):
+        remove_sibling_block(text, "hotgate")
 
 
 # ---------------------------------------------------------------------------
@@ -574,7 +618,9 @@ def test_repo_check_and_render_are_deterministic_without_host_state(tmp_path: Pa
     without_host = check_repo(repo, strict=True, env=bare_env)
     assert without_host["ok"] is True, without_host["findings"]
     assert without_host["findings"] == with_host["findings"]
-    assert without_host["repo"]["tracked"]["sibling_blocks"] == {"hotgate": {"present": True, "malformed": False}}
+    assert without_host["repo"]["tracked"]["sibling_blocks"] == {
+        name: {"present": True, "malformed": False} for name in ("agrein", "agroute", "agcoord", "hotgate")
+    }
     rendered = _cli_json(["repo", "render", "--repo", str(repo)], cwd=tmp_path, env=bare_env)
     assert rendered["profile"]["tools"] == ["hotgate"]
 
@@ -669,6 +715,69 @@ def test_repos_check_reports_invalid_host_config_only_for_repos_with_tools(tmp_p
     by_name = {item["name"]: item for item in data["repos"]}
     assert by_name["plain"]["ok"] is True
     assert [f["component"] for f in _non_info(by_name["with-tools"]["findings"])] == ["host-config"]
+
+
+def _builtin_snippet_host(tmp_path: Path) -> tuple[HotgateHost, Path]:
+    """A healthy host whose Claude Code install of ``agrein`` ships its own snippet."""
+
+    host = _hotgate_host(tmp_path, installed=())
+    root = tmp_path / "plugin-roots" / "agrein"
+    root.mkdir(parents=True)
+    (root / "AGENTS.snippet.md").write_text("<!-- agrein:begin -->\n- Installed agrein guidance.\n<!-- agrein:end -->\n")
+    claude = [
+        {"id": f"{spec.name}@{spec.name}", "version": version, "scope": "user", "enabled": True}
+        for spec, version in zip(BUILTIN_PLUGINS, ("0.1.0", "0.10.1", "6.0.0", "0.7.0"))
+    ]
+    claude[0]["installPath"] = str(root)
+    install_healthy_host_shims(host.bin_dir, host.home, claude_plugins=claude)
+    host.config_path.unlink()
+    return host, root / "AGENTS.snippet.md"
+
+
+def test_builtin_snippets_resolve_installed_copy_then_builtin_fallback(tmp_path: Path) -> None:
+    host, snippet = _builtin_snippet_host(tmp_path)
+    resolutions = resolve_tool_snippets(("agrein", "agroute", "howhard", "agcoord"), env=host.env)
+    assert (resolutions["agrein"].origin, resolutions["agrein"].body) == ("claude", "- Installed agrein guidance.")
+    assert resolutions["agrein"].path == str(snippet)
+    for name in ("agroute", "howhard", "agcoord"):
+        # Installed, but this plugin version ships no snippet: the built-in copy applies.
+        assert resolutions[name].installed is True
+        assert (resolutions[name].origin, resolutions[name].path) == ("builtin", None)
+        assert resolutions[name].body == BUILTIN_SNIPPETS[name].strip()
+
+    bare_env, _, _ = make_isolated_env(tmp_path / "offline")
+    offline = resolve_tool_snippets(("agrein",), env=bare_env)["agrein"]
+    assert (offline.origin, offline.installed, offline.body) == ("builtin", False, BUILTIN_SNIPPETS["agrein"].strip())
+
+
+def test_combined_checks_detect_builtin_block_drift_while_repo_check_stays_offline(tmp_path: Path) -> None:
+    host, snippet = _builtin_snippet_host(tmp_path)
+    repo = init_git_repo(tmp_path / "repo", host.env)
+    result = init_repo(repo_path=repo, register=False, env=host.env)
+    assert result["sibling_blocks"] == ["agrein", "agroute", "agcoord"]
+    descriptions = {a["component"]: a["description"] for a in result["actions"]}
+    assert descriptions["agents-md:agrein"] == f"Update AGENTS.md 'agrein' block from {snippet}."
+    assert "built-in gardenia copy" in descriptions["agents-md:agcoord"]
+    text = (repo / "AGENTS.md").read_text(encoding="utf-8")
+    assert "<!-- agrein:begin -->\n- Installed agrein guidance.\n<!-- agrein:end -->" in text
+    assert _combined(host, tmp_path, repo, 0) == ([], [])
+
+    snippet.write_text("- Newer agrein guidance.\n", encoding="utf-8")
+    for findings in _combined(host, tmp_path, repo, 1):
+        assert [(f["scope"], f["severity"], f["component"]) for f in findings] == [
+            ("repo", "warning", "agents-md:agrein")
+        ]
+        assert "installed AGENTS.snippet.md" in findings[0]["message"]
+
+    # Without the installed copy, the block is compared with the built-in fallback instead.
+    snippet.unlink()
+    for findings in _combined(host, tmp_path, repo, 1):
+        assert [f["component"] for f in findings] == ["agents-md:agrein"]
+        assert "built-in gardenia copy" in findings[0]["message"]
+    assert check_repo(repo, strict=True, env=host.env)["ok"] is True
+
+    init_repo(repo_path=repo, register=False, env=host.env)
+    assert _combined(host, tmp_path, repo, 0) == ([], [])
 
 
 # ---------------------------------------------------------------------------

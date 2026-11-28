@@ -14,15 +14,68 @@ from conftest import (
     run_cli,
 )
 from gardenia.models import MANAGED_BEGIN, MANAGED_END
+from gardenia.snippets import BUILTIN_SNIPPETS
 
 
-def test_repo_render_outside_git_and_routing_modes(tmp_path: Path) -> None:
+DEFAULT_BLOCK = """\
+<!-- gardenia:begin -->
+- File an issue (`#N — one sentence describing the work`) for each code, test, docs, or packaging
+  change; work in an issue-named `/var/tmp` worktree from `origin/main`, keep the primary checkout
+  read-only, and keep check logs complete (never truncated).
+- Verify behavior at public boundaries with focused tests (bug fixes start with a failing one) and
+  add canonical docs plus a `CHANGELOG.md` entry for user-facing changes. Tests stop and remove all
+  they create and never touch `~/.codex`, `~/.claude`, `~/.gemini`, `~/.config`, or `~/.local`.
+- Docs-only changes (every path `README.md`, `CHANGELOG.md`, `AGENTS.md`, Markdown in `docs/`, or
+  a `docs/assets/` `.png`/`.svg` with provenance in `docs/assets/README.md`) skip tests and the
+  gate; verify the PR file list and diff, then merge via the forge.
+- Gate through `agc run` / `agc land <pr>` where `agc` is available, passing
+  `--no-overflow --resource cpu=4 --resource memory=4294967296 -- bash scripts/check`; elsewhere,
+  run `bash scripts/check` and merge via the forge after it passes.
+- Never put private project names, machine-local paths, or other repositories' issue links in
+  tracked files, commits, or pull requests.
+- PyPI uploads and live host or production changes need explicit owner approval per operation.
+<!-- gardenia:end -->
+"""
+
+# Tool usage minutiae belong in each plugin's installed skill, never in the gardenia block.
+TOOL_TUTORIAL_FRAGMENTS = (
+    "agr candidates",
+    "agr plan",
+    "price_request",
+    "baseline_request",
+    "--auto-decide",
+    "matched_receipt",
+    "needs_review",
+    "ticket-delivery",
+    "agc tui",
+)
+
+
+def _render(args: list[str], tmp_path: Path, env: dict[str, str]) -> dict:
+    proc = run_cli(["repo", "render", *args, "--json"], cwd=tmp_path, env=env)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_repo_render_default_block_is_compact_and_free_of_tool_tutorials(tmp_path: Path) -> None:
     env, _, _ = make_isolated_env(tmp_path)
 
-    proc = run_cli(
+    proc = run_cli(["repo", "render"], cwd=tmp_path, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == DEFAULT_BLOCK
+    assert len(DEFAULT_BLOCK.splitlines()) <= 18
+    assert not any(fragment in DEFAULT_BLOCK for fragment in TOOL_TUTORIAL_FRAGMENTS)
+
+    data = _render([], tmp_path, env)
+    assert data["managed_block"] + "\n" == DEFAULT_BLOCK
+    assert data["sibling_blocks"] == ["agrein", "agroute", "agcoord"]
+
+
+def test_repo_render_follows_profile_parameters_and_routing_modes(tmp_path: Path) -> None:
+    env, _, _ = make_isolated_env(tmp_path)
+
+    required = _render(
         [
-            "repo",
-            "render",
             "--gate",
             "pytest -q",
             "--cpu",
@@ -37,70 +90,37 @@ def test_repo_render_outside_git_and_routing_modes(tmp_path: Path) -> None:
             "--agcoord",
             "required",
             "--no-docs-only-exemption",
+            "--tool",
+            "hotgate",
         ],
-        cwd=tmp_path,
-        env=env,
+        tmp_path,
+        env,
     )
-    assert proc.returncode == 0, proc.stderr
-    out = proc.stdout
-    assert out.startswith(MANAGED_BEGIN)
-    assert out.strip().endswith(MANAGED_END)
-    assert "agr candidates --host <codex|claude|agy>" in out
+    block = required["managed_block"]
+    assert block.startswith(MANAGED_BEGIN) and block.endswith(MANAGED_END)
     assert (
-        "  3. Select a route with `howhard` (`context --host <codex|claude|agy> --auto-decide`, or\n"
-        "     `context`/`retrieve`/`decide` evaluating `baseline_request` in an independent stateless\n"
-        "     context only when non-null, or `pick --host <codex|claude|agy>`), then resolve the\n"
-        "     execution plan with\n"
-        "     `agr plan --host <codex|claude|agy> --decision /tmp/TASK-decision.json --json`.\n"
-        "  4. Honor `needs_review`."
-    ) in out
-    assert (
-        '  - Check: `agc run --label "<short plain-English summary>" '
-        '--resource cpu=2 --resource memory=2147483648 --resource tmpfs=1073741824 --resource tmpfs_inodes=262144 -- pytest -q`'
-    ) in out
-    assert (
-        '  - Land: `agc land <pr> --label "land #<pr> <short summary>" '
-        '--resource cpu=2 --resource memory=2147483648 --resource tmpfs=1073741824 --resource tmpfs_inodes=262144 -- pytest -q`'
-    ) in out
-    assert (
-        '  Give every job a short plain-English `--label` for humans in `agc list` and `agc tui`\n'
-        '  (lead with what is checked or landed; omit commit SHAs, branch names, `"pre-land"` tags,\n'
-        '  and file paths).'
-    ) in out
-    assert "--no-overflow" not in out
-    assert "documentation-only change" not in out
+        "- Gate only through `agc run` / `agc land <pr>`, passing\n"
+        "  `--resource cpu=2 --resource memory=2147483648 --resource tmpfs=1073741824 "
+        "--resource tmpfs_inodes=262144 -- pytest -q`.\n"
+    ) in block
+    assert "--no-overflow" not in block
+    assert "elsewhere" not in block
+    assert "Docs-only" not in block
+    assert required["sibling_blocks"] == ["agrein", "agroute", "agcoord", "hotgate"]
 
-    proc_auto = run_cli(["repo", "render", "--agcoord", "auto"], cwd=tmp_path, env=env)
-    assert proc_auto.returncode == 0, proc_auto.stderr
-    auto_out = proc_auto.stdout
-    assert (
-        '  - Check: `agc run --label "<short plain-English summary>" '
-        '--no-overflow --resource cpu=4 --resource memory=4294967296 -- bash scripts/check`'
-    ) in auto_out
-    assert (
-        '  - Land: `agc land <pr> --label "land #<pr> <short summary>" '
-        '--no-overflow --resource cpu=4 --resource memory=4294967296 -- bash scripts/check`'
-    ) in auto_out
-    assert (
-        '  Give every job a short plain-English `--label` for humans in `agc list` and `agc tui`\n'
-        '  (lead with what is checked or landed; omit commit SHAs, branch names, `"pre-land"` tags,\n'
-        '  and file paths).'
-    ) in auto_out
+    howhard = _render(["--routing", "howhard", "--agcoord", "none"], tmp_path, env)
+    assert "agc run" not in howhard["managed_block"] and "agc land" not in howhard["managed_block"]
+    assert "- Run `bash scripts/check` before every merge, and merge via the forge only after it passes.\n" in (
+        howhard["managed_block"]
+    )
+    assert howhard["sibling_blocks"] == ["agrein", "howhard"]
 
-    proc_hh = run_cli(["repo", "render", "--routing", "howhard", "--agcoord", "none"], cwd=tmp_path, env=env)
-    assert proc_hh.returncode == 0
-    assert "agr candidates" not in proc_hh.stdout
-    assert (
-        "- Coordinate ticket work by delegating each authorized ticket to a native worker\n"
-        "  selected with the installed `howhard` skill (`context --host <codex|claude|agy> --auto-decide`,\n"
-        "  or `context`/`retrieve`/`decide` evaluating `baseline_request` in an independent stateless\n"
-        "  context only when non-null, or `pick --host <codex|claude|agy>`), then record the actual\n"
-        "  outcome and measured usage in `howhard` (`observe`, `usage attach`) and update `howhard`\n"
-        "  memory; an assigned leaf worker implements its ticket directly without recursively\n"
-        "  delegating it.\n"
-        "- Track every code, test, documentation, or packaging change"
-    ) in proc_hh.stdout
-    assert "agc run" not in proc_hh.stdout
+    bare = _render(["--routing", "none", "--agcoord", "none"], tmp_path, env)
+    assert bare["sibling_blocks"] == ["agrein"]
+    for data in (required, howhard, bare):
+        assert not any(fragment in data["managed_block"] for fragment in TOOL_TUTORIAL_FRAGMENTS)
+        for name in data["sibling_blocks"]:
+            assert f"<!-- {name}:begin -->" not in data["managed_block"]
 
 
 def test_repo_init_preserves_surrounding_prose_and_passes_strict_check(tmp_path: Path) -> None:
@@ -126,7 +146,10 @@ def test_repo_init_preserves_surrounding_prose_and_passes_strict_check(tmp_path:
     assert init_proc.returncode == 0, init_proc.stderr
     updated = (repo / "AGENTS.md").read_text(encoding="utf-8")
     assert updated.startswith("# My custom repo header\n\nProject-specific rule above.\n\n<!-- gardenia:begin -->")
-    assert updated.endswith("<!-- gardenia:end -->\n\n## Custom footer\n\nKeep this footer intact byte-for-byte.\n")
+    # Built-in blocks are grouped right after the managed block, ahead of the untouched footer.
+    assert updated.endswith("<!-- agcoord:end -->\n\n## Custom footer\n\nKeep this footer intact byte-for-byte.\n")
+    markers = [MANAGED_END, "<!-- agrein:begin -->", "<!-- agroute:begin -->", "<!-- agcoord:begin -->", "## Custom"]
+    assert [updated.index(marker) for marker in markers] == sorted(updated.index(marker) for marker in markers)
     assert "stale placeholder content" not in updated
     assert (repo / "CLAUDE.md").is_symlink()
     assert os.readlink(repo / "CLAUDE.md") == "AGENTS.md"
@@ -273,4 +296,86 @@ def test_repo_init_refuses_malformed_markers(tmp_path: Path) -> None:
 
     proc = run_cli(["repo", "init", "--repo", str(repo), "--json"], cwd=tmp_path, env=env)
     assert proc.returncode == 2
+    assert (repo / "AGENTS.md").read_text(encoding="utf-8") == original
+
+
+def _block(name: str) -> str:
+    return f"<!-- {name}:begin -->\n{BUILTIN_SNIPPETS[name].strip()}\n<!-- {name}:end -->"
+
+
+def _findings(result: dict) -> list[tuple[str, str]]:
+    return sorted((f["severity"], f["component"]) for f in result["findings"] if f["severity"] != "info")
+
+
+def test_repo_init_stamps_builtin_blocks_offline_and_follows_profile_changes(tmp_path: Path) -> None:
+    env, _, _ = make_isolated_env(tmp_path)  # no agent client and no plugin cache on this host
+    repo = init_git_repo(tmp_path / "repo", env)
+    agents = repo / "AGENTS.md"
+    agents.write_text("# Rules\n\nKeep me.\n", encoding="utf-8")
+
+    first = run_cli(["repo", "init", "--repo", str(repo), "--save-config", "--no-register", "--json"], cwd=tmp_path, env=env)
+    assert first.returncode == 0, first.stderr
+    data = json.loads(first.stdout)
+    assert data["sibling_blocks"] == ["agrein", "agroute", "agcoord"]
+    assert data["unresolved_tools"] == [] and data["warnings"] == []
+    text = agents.read_text(encoding="utf-8")
+    assert text == (
+        "# Rules\n\nKeep me.\n\n"
+        f"{data['managed_block']}\n\n{_block('agrein')}\n\n{_block('agroute')}\n\n{_block('agcoord')}\n"
+    )
+    assert "howhard:begin" not in text
+    chk = run_cli(["repo", "check", "--repo", str(repo), "--strict", "--json"], cwd=tmp_path, env=env)
+    assert chk.returncode == 0, chk.stdout
+    assert json.loads(chk.stdout)["repo"]["tracked"]["sibling_blocks"] == {
+        name: {"present": True, "malformed": False} for name in ("agrein", "agroute", "agcoord")
+    }
+
+    again = run_cli(["repo", "init", "--repo", str(repo), "--no-register", "--json"], cwd=tmp_path, env=env)
+    assert {a["status"] for a in json.loads(again.stdout)["actions"]} == {"skipped"}
+    assert agents.read_text(encoding="utf-8") == text
+
+    # Switching routing and agcoord is visible offline before re-stamping.
+    (repo / "gardenia.toml").write_text('routing = "howhard"\nagcoord = "none"\n', encoding="utf-8")
+    drifted = run_cli(["repo", "check", "--repo", str(repo), "--json"], cwd=tmp_path, env=env)
+    assert drifted.returncode == 0, drifted.stdout
+    assert _findings(json.loads(drifted.stdout)) == [
+        ("warning", "agents-md"),
+        ("warning", "agents-md:agcoord"),
+        ("warning", "agents-md:agroute"),
+        ("warning", "agents-md:howhard"),
+    ]
+
+    switched = run_cli(["repo", "init", "--repo", str(repo), "--no-register", "--json"], cwd=tmp_path, env=env)
+    assert switched.returncode == 0, switched.stderr
+    planned = {a["component"]: a["description"] for a in json.loads(switched.stdout)["actions"] if a["status"] == "executed"}
+    assert set(planned) == {"agents-md", "agents-md:howhard", "agents-md:agroute", "agents-md:agcoord"}
+    assert planned["agents-md:agroute"].startswith("Remove AGENTS.md 'agroute' block")
+    block = json.loads(switched.stdout)["managed_block"]
+    assert agents.read_text(encoding="utf-8") == (
+        f"# Rules\n\nKeep me.\n\n{block}\n\n{_block('agrein')}\n\n{_block('howhard')}\n"
+    )
+    strict = run_cli(["repo", "check", "--repo", str(repo), "--strict", "--json"], cwd=tmp_path, env=env)
+    assert strict.returncode == 0, strict.stdout
+
+    # A deleted built-in block is a warning that repo init can always repair offline.
+    agents.write_text(agents.read_text(encoding="utf-8").replace(f"\n\n{_block('howhard')}", ""), encoding="utf-8")
+    missing = run_cli(["repo", "check", "--repo", str(repo), "--json"], cwd=tmp_path, env=env)
+    assert missing.returncode == 0
+    assert _findings(json.loads(missing.stdout)) == [("warning", "agents-md:howhard")]
+    assert run_cli(["repo", "check", "--repo", str(repo), "--strict"], cwd=tmp_path, env=env).returncode == 1
+    run_cli(["repo", "init", "--repo", str(repo), "--no-register"], cwd=tmp_path, env=env)
+    assert agents.read_text(encoding="utf-8").endswith(f"{_block('agrein')}\n\n{_block('howhard')}\n")
+
+
+def test_repo_init_refuses_malformed_builtin_markers_before_writing(tmp_path: Path) -> None:
+    env, _, _ = make_isolated_env(tmp_path)
+    repo = init_git_repo(tmp_path / "repo", env)
+    # agroute is inactive under this profile, yet its broken markers still block the write.
+    (repo / "gardenia.toml").write_text('routing = "none"\n', encoding="utf-8")
+    original = "# Rules\n\n<!-- agroute:begin -->\nunterminated\n"
+    (repo / "AGENTS.md").write_text(original, encoding="utf-8")
+
+    proc = run_cli(["repo", "init", "--repo", str(repo), "--no-register", "--json"], cwd=tmp_path, env=env)
+    assert proc.returncode == 2
+    assert "Malformed agroute markers" in json.loads(proc.stdout)["error"]
     assert (repo / "AGENTS.md").read_text(encoding="utf-8") == original

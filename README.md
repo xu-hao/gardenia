@@ -53,10 +53,11 @@ gardenia host check
 
 ### Step 2 — Once per repository (`gardenia repo`)
 
-Inside your repository's primary checkout, insert the delimited
-`<!-- gardenia:begin --> ... <!-- gardenia:end -->` guardrail block into `AGENTS.md`
-(preserving every surrounding project-specific line), link `CLAUDE.md -> AGENTS.md`,
-and persist your profile to `gardenia.toml`:
+Inside your repository's primary checkout, insert the compact delimited
+`<!-- gardenia:begin --> ... <!-- gardenia:end -->` guardrail block into `AGENTS.md`,
+followed by one block per active plugin stamped from its `AGENTS.snippet.md` (preserving
+every surrounding project-specific line), link `CLAUDE.md -> AGENTS.md`, and persist your
+profile to `gardenia.toml`:
 
 ```sh
 gardenia repo init --gate "bash scripts/check" --cpu 4 --memory-gb 4 --save-config

@@ -9,7 +9,14 @@ import sys
 from typing import Any, Sequence
 
 from gardenia import __version__
-from gardenia.host import HostInventory, check_host, parse_clients_arg, setup_host, verify_repo_tools
+from gardenia.host import (
+    HostInventory,
+    check_host,
+    parse_clients_arg,
+    setup_host,
+    verify_builtin_blocks,
+    verify_repo_tools,
+)
 from gardenia.models import CHECK_FORMAT, Finding, GardeniaError, compute_ok
 from gardenia.repo import check_repo, init_repo, render_repo, try_resolve_git_repo
 from gardenia.repos import (
@@ -590,15 +597,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 repo_res = check_repo(args.repo, strict=args.strict)
                 repo_payload = repo_res["repo"]
                 all_findings.extend(repo_res["_findings"])
-                config = repo_payload["tracked"]["config"]
-                if config["valid"] and config["values"]["tools"]:
-                    tool_findings = verify_repo_tools(
-                        config["values"]["tools"],
-                        HostInventory(),
-                        repo_root=Path(repo_payload["tracked"]["root"]),
-                        stealth=repo_payload["tracked"]["stealth"],
-                        clients=clients,
-                        with_agcoord=args.with_agcoord,
+                tracked = repo_payload["tracked"]
+                config = tracked["config"]
+                if config["valid"]:
+                    tools = config["values"]["tools"]
+                    builtin = [name for name in tracked["sibling_blocks"] if name not in tools]
+                    inventory = HostInventory()
+                    tool_findings: list[Finding] = []
+                    if tools:
+                        tool_findings = verify_repo_tools(
+                            tools,
+                            inventory,
+                            repo_root=Path(tracked["root"]),
+                            stealth=tracked["stealth"],
+                            clients=clients,
+                            with_agcoord=args.with_agcoord,
+                        )
+                    tool_findings += verify_builtin_blocks(
+                        builtin, inventory, repo_root=Path(tracked["root"]), stealth=tracked["stealth"]
                     )
                     all_findings.extend(f for f in tool_findings if f not in all_findings)
 
